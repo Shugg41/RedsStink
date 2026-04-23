@@ -47,7 +47,7 @@ hitter_names = sorted(list(hitters.keys()))
 pitcher_names = sorted(list(pitchers.keys()))
 
 # Build the app tabs
-tab1, tab2 = st.tabs(["Offensive Props", "Pitcher Props"])
+tab1, tab2, tab3 = st.tabs(["Offensive Props", "Pitcher Props", "System Picks"])
 
 with tab1:
     st.header("Batter Analysis")
@@ -118,3 +118,27 @@ with tab2:
             st.write("No stats available for this pitcher yet.")
     else:
         st.write("Could not retrieve stats.")
+
+with tab3:
+    st.header("System Scans")
+    st.write("Find the strongest prop candidates based on the last 7 days of live game data.")
+    
+    if st.button("Scan Hottest Reds Hitters"):
+        with st.spinner("Scanning active roster..."):
+            target_list = []
+            for name, p_id in hitters.items():
+                url = f"https://statsapi.mlb.com/api/v1/people/{p_id}/stats?stats=last7Days&group=hitting"
+                req = requests.get(url).json()
+                if 'stats' in req and req['stats'] and req['stats'][0]['splits']:
+                    stat = req['stats'][0]['splits'][0]['stat']
+                    hrr = stat.get('hits', 0) + stat.get('runs', 0) + stat.get('rbi', 0)
+                    tb = stat.get('totalBases', 0)
+                    target_list.append({"Player": name, "HRR": hrr, "Total Bases": tb, "AVG": stat.get('avg', '.000')})
+            
+            if target_list:
+                df = pd.DataFrame(target_list)
+                df = df.sort_values(by="HRR", ascending=False).head(5)
+                st.write("### Top 5 Offensive Targets")
+                st.dataframe(df, hide_index=True)
+            else:
+                st.write("No recent data found. Team may be coming off a break.")
