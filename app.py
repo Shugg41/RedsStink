@@ -203,7 +203,8 @@ if data['totalGames'] > 0:
                 
                 # Raw Data Expander
                 with st.expander("View Raw Scanner Data"):
-                    st.dataframe(df.style.background_gradient(cmap='Reds', subset=['HRR', 'Total Bases']), use_container_width=True)
+                    # Removed Pandas styling to prevent matplotlib ImportError on Streamlit Cloud
+                    st.dataframe(df, use_container_width=True)
             else:
                 st.info("No active hitter data found for the last 7 days. (Is it the off-season?)")
 else:
