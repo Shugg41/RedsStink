@@ -85,4 +85,36 @@ with tab2:
     st.header("Pitcher Analysis")
     pitcher_name = st.selectbox("Select Reds Pitcher", pitcher_names)
     pitcher_id = pitchers[pitcher_name]
-    st.info(f"System ready to pull strikeout metrics for {pitcher_name} (ID: {pitcher_id}).")
+    
+    # Pull current season stats for the selected pitcher
+    p_stats_url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats?stats=season&group=pitching"
+    p_stats_req = requests.get(p_stats_url).json()
+    
+    if 'stats' in p_stats_req and p_stats_req['stats']:
+        p_splits = p_stats_req['stats'][0]['splits']
+        if p_splits:
+            p_stat = p_splits[0]['stat']
+            games_started = p_stat.get('gamesStarted', 0)
+            innings = p_stat.get('inningsPitched', '0')
+            strikeouts = p_stat.get('strikeOuts', 0)
+            walks = p_stat.get('baseOnBalls', 0)
+            
+            if games_started > 0:
+                k_per_start = round(strikeouts / games_started, 2)
+            else:
+                k_per_start = 0
+            
+            st.write(f"### 2026 Season Totals for {pitcher_name}")
+            st.write(f"**Games Started:** {games_started}")
+            st.write(f"**Innings Pitched:** {innings}")
+            st.write(f"**Total Strikeouts:** {strikeouts}")
+            st.write(f"**Total Walks:** {walks}")
+            
+            if games_started > 0:
+                st.write(f"**Average Strikeouts per Start:** {k_per_start}")
+            else:
+                st.write("*(Reliever or no starts recorded)*")
+        else:
+            st.write("No stats available for this pitcher yet.")
+    else:
+        st.write("Could not retrieve stats.")
