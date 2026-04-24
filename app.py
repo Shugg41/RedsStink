@@ -4,10 +4,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 
-# --- PAGE CONFIG ---
+# PAGE CONFIG
 st.set_page_config(page_title="Reds Prop Dashboard", page_icon="🔴", layout="wide")
 
-# --- CUSTOM CSS ---
+# CUSTOM CSS
 st.markdown("""
     <style>
     .big-font { font-size:20px !important; font-weight: bold; }
@@ -15,15 +15,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- API HELPERS & CACHING ---
+# API HELPERS & CACHING
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}"
     return requests.get(url).json()
 
 @st.cache_data(ttl=86400)
-def get_roster():
-    url = "https://statsapi.mlb.com/api/v1/teams/113/roster"
+def get_roster(team_id):
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
     return requests.get(url).json().get('roster', [])
 
 @st.cache_data(ttl=3600)
@@ -60,7 +60,7 @@ def get_game_logs(player_id, year):
     except (KeyError, IndexError):
         return []
 
-# --- SIDEBAR & GLOBAL ---
+# SIDEBAR & GLOBAL
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/01/Cincinnati_Reds_Logo.svg/1200px-Cincinnati_Reds_Logo.svg.png", width=100)
     st.title("Settings")
@@ -71,7 +71,7 @@ with st.sidebar:
 st.title("🔴 Reds Matchup & Prop Engine")
 st.markdown("Find your betting edges with real-time MLB API data, BvP matchups, and objective confidence ratings.")
 
-# --- MATCHUP ENGINE ---
+# MATCHUP ENGINE
 data = get_schedule(date_str)
 
 if data['totalGames'] > 0:
@@ -82,9 +82,11 @@ if data['totalGames'] > 0:
     # Determine Opponent & Pitcher
     if "Reds" in away_team:
         opponent = home_team
+        opp_team_id = game['teams']['home']['team']['id']
         opp_pitcher_data = game['teams']['home'].get('probablePitcher', {})
     else:
         opponent = away_team
+        opp_team_id = game['teams']['away']['team']['id']
         opp_pitcher_data = game['teams']['away'].get('probablePitcher', {})
 
     opp_pitcher_name = opp_pitcher_data.get('fullName', 'TBD')
@@ -92,24 +94,35 @@ if data['totalGames'] > 0:
 
     # Matchup Header
     st.subheader(f"🏟️ Matchup: Reds vs {opponent}")
-    if opp_pitcher_name != 'TBD':
+    
+    # Dynamic Fallback UI for TBD Pitchers
+    if opp_pitcher_name == 'TBD':
+        st.warning("Official lineup card not submitted. API shows TBD. Select the starter manually to run the algorithm.", icon="⚠️")
+        opp_roster = get_roster(opp_team_id)
+        opp_pitchers = {p['person']['fullName']: p['person']['id'] for p in opp_roster if p['position']['abbreviation'] == 'P'}
+        
+        if opp_pitchers:
+            manual_pitcher = st.selectbox(f"Select {opponent} Starter:", ["Select..."] + sorted(opp_pitchers.keys()))
+            if manual_pitcher != "Select...":
+                opp_pitcher_name = manual_pitcher
+                opp_pitcher_id = opp_pitchers[manual_pitcher]
+
+    if opp_pitcher_name != 'TBD' and opp_pitcher_id:
         st.info(f"**Targeting Opposing Starter:** {opp_pitcher_name} (ID: {opp_pitcher_id})", icon="🎯")
-    else:
-        st.warning("Opposing Pitcher: TBD (BvP stats will be unavailable until lineup is submitted)", icon="⚠️")
     
     st.divider()
     
-    # --- PULL ROSTER ---
-    roster_res = get_roster()
+    # PULL REDS ROSTER
+    roster_res = get_roster(113) # 113 is Reds Team ID
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-    # --- TABS ---
+    # TABS
     tab1, tab2, tab3 = st.tabs(["🏏 Offensive Props", "⚾ Pitcher Props", "🎯 The Confidence Engine"])
 
-    # ----------------------------
+    # ============================
     # TAB 1: BATTERS & BvP
-    # ----------------------------
+    # ============================
     with tab1:
         col1, col2 = st.columns([1, 2])
         with col1:
@@ -154,7 +167,7 @@ if data['totalGames'] > 0:
             else:
                 st.info(f"Pitch arsenal data not yet available for {opp_pitcher_name}.")
         else:
-            st.info("Awaiting opposing pitcher announcement for arsenal breakdown.")
+            st.info("Awaiting opposing pitcher assignment for arsenal breakdown.")
 
         st.divider()
 
@@ -172,11 +185,11 @@ if data['totalGames'] > 0:
             else:
                 st.info(f"No historical at-bats for {batter_name} vs {opp_pitcher_name}.")
         else:
-            st.info("Awaiting opposing pitcher announcement for BvP stats.")
+            st.info("Awaiting opposing pitcher assignment for BvP stats.")
 
-    # ----------------------------
+    # ============================
     # TAB 2: PITCHERS
-    # ----------------------------
+    # ============================
     with tab2:
         col1, col2 = st.columns([1, 2])
         with col1:
@@ -196,16 +209,16 @@ if data['totalGames'] > 0:
         except (KeyError, IndexError):
             st.warning(f"No {current_year} regular season stats found for {pitcher_name}.")
 
-    # ----------------------------
+    # ============================
     # TAB 3: THE CONFIDENCE ENGINE
-    # ----------------------------
+    # ============================
     with tab3:
         st.markdown("### 🎯 The Confidence Engine")
         st.caption("Grades the roster objectively on 3 tests: Consistency (Hits in 7 of last 10 games), Performance (Season OPS > .750), and Matchup History (BvP AVG > .250).")
         
         if st.button("Run Algorithm", type="primary"):
             if not opp_pitcher_id:
-                st.error("Cannot run full algorithm. The opposing pitcher is TBD, so we cannot calculate the BvP matchup test. Check back closer to first pitch.")
+                st.error("Cannot run full algorithm. Please select the opposing pitcher manually from the dropdown above.")
             else:
                 progress_bar = st.progress(0, text="Evaluating roster...")
                 scan_results = []
@@ -217,16 +230,16 @@ if data['totalGames'] > 0:
                     points = 0
                     traits = []
                     
-                    # Test 1: Consistency (Hits in 7 of last 10 games)
+                    # Test 1: Consistency
                     logs = get_game_logs(p_id, current_year)
                     if logs:
-                        recent_logs = logs[-10:] # Get up to the last 10 games
+                        recent_logs = logs[-10:]
                         hit_games = sum(1 for game in recent_logs if game.get('stat', {}).get('hits', 0) > 0)
                         if hit_games >= 7:
                             points += 1
                             traits.append(f"Consistent ({hit_games} of last 10 games with a hit)")
                     
-                    # Test 2: Performance (Season OPS > .750)
+                    # Test 2: Performance
                     s_data = get_season_stats(p_id, "hitting", current_year)
                     try:
                         ops = float(s_data['stats'][0]['splits'][0]['stat'].get('ops', '.000'))
@@ -236,7 +249,7 @@ if data['totalGames'] > 0:
                     except (KeyError, IndexError, ValueError):
                         pass
                         
-                    # Test 3: Matchup History (BvP AVG > .250)
+                    # Test 3: Matchup History
                     bvp = get_bvp_stats(p_id, opp_pitcher_id)
                     if bvp:
                         bvp_avg = float(bvp.get('avg', '.000'))
@@ -263,11 +276,10 @@ if data['totalGames'] > 0:
                 
                 if scan_results:
                     df = pd.DataFrame(scan_results).sort_values(by="Score", ascending=False)
-                    # Clean up output table
                     st.dataframe(df[['Player', 'Tier', 'Edge Identified']], hide_index=True, use_container_width=True)
                 else:
                     st.info("No data available to process.")
 
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
-    st.info("Check **Tomorrow (April 24)** in the sidebar to scout the Tigers series. Framber Valdez (LHP) is the projected starter.")
+    st.info("Check a valid game date in the sidebar to scout matchups.")
