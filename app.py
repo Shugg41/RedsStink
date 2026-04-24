@@ -118,37 +118,12 @@ if data['totalGames'] > 0:
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
     # TABS
-    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Props", "⚾ Pitcher Props", "🎯 The Confidence Engine"])
+    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Matchups", "⚾ Pitcher Props", "🎯 The Confidence Engine"])
 
     # ============================
-    # TAB 1: BATTERS & BvP
+    # TAB 1: FULL OFFENSE OVERVIEW
     # ============================
     with tab1:
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            batter_name = st.selectbox("Select Reds Batter", sorted(hitters.keys()))
-            b_id = hitters[batter_name]
-        
-        # Season Stats
-        s_data = get_season_stats(b_id, "hitting", current_year)
-        try:
-            stat = s_data['stats'][0]['splits'][0]['stat']
-            hrr = stat.get('hits', 0) + stat.get('runs', 0) + stat.get('rbi', 0)
-            ops_val = float(stat.get('ops', '.000'))
-            
-            st.markdown(f"### {current_year} Season Metrics")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("AVG", stat.get('avg', '.000'))
-            m2.metric("OPS", f"{ops_val:.3f}")
-            m3.metric("Total Bases", stat.get('totalBases', 0))
-            m4.metric("HRR (Hits+Runs+RBI)", hrr)
-                
-        except (KeyError, IndexError, ValueError):
-            st.warning(f"No {current_year} regular season stats found for {batter_name}.")
-
-        st.divider()
-
-        # Pitch Arsenal Scouting Report
         st.markdown(f"### 🎯 Scouting Report: {opp_pitcher_name}'s Arsenal")
         if opp_pitcher_id:
             arsenal = get_pitch_arsenal(opp_pitcher_id, current_year)
@@ -171,21 +146,54 @@ if data['totalGames'] > 0:
 
         st.divider()
 
-        # BvP Stats (Batter vs Pitcher)
-        st.markdown("### ⚔️ Batter vs. Pitcher (BvP) History")
-        if opp_pitcher_id:
-            bvp = get_bvp_stats(b_id, opp_pitcher_id)
-            if bvp:
-                st.success(f"Historical Matchup Data vs {opp_pitcher_name} found!")
-                b1, b2, b3, b4 = st.columns(4)
-                b1.metric("At Bats", bvp.get('atBats', 0))
-                b2.metric("Hits", bvp.get('hits', 0))
-                b3.metric("Home Runs", bvp.get('homeRuns', 0))
-                b4.metric("BvP AVG", bvp.get('avg', '.000'))
+        st.markdown("### ⚔️ Reds Roster vs. Pitcher")
+        st.caption("View season metrics and historical BvP data for the entire active roster at once.")
+
+        if st.button("Load Team Matchup Data", type="primary"):
+            progress_bar = st.progress(0, text="Pulling roster stats...")
+            roster_data = []
+            total_hitters = len(hitters)
+
+            for i, (name, p_id) in enumerate(hitters.items()):
+                progress_bar.progress((i + 1) / total_hitters, text=f"Loading {name}...")
+
+                p_avg, p_ops, p_hrr = ".000", ".000", 0
+                b_ab, b_avg, b_hr = 0, ".000", 0
+
+                s_data = get_season_stats(p_id, "hitting", current_year)
+                try:
+                    stat = s_data['stats'][0]['splits'][0]['stat']
+                    p_avg = stat.get('avg', '.000')
+                    ops_val = float(stat.get('ops', '.000'))
+                    p_ops = f"{ops_val:.3f}"
+                    p_hrr = stat.get('hits', 0) + stat.get('runs', 0) + stat.get('rbi', 0)
+                except (KeyError, IndexError, ValueError):
+                    pass
+
+                if opp_pitcher_id:
+                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
+                    if bvp:
+                        b_ab = bvp.get('atBats', 0)
+                        b_avg = bvp.get('avg', '.000')
+                        b_hr = bvp.get('homeRuns', 0)
+
+                roster_data.append({
+                    "Player": name,
+                    "Season AVG": p_avg,
+                    "Season OPS": p_ops,
+                    "Season HRR": p_hrr,
+                    "BvP ABs": b_ab,
+                    "BvP AVG": b_avg,
+                    "BvP HRs": b_hr
+                })
+
+            progress_bar.empty()
+
+            if roster_data:
+                df = pd.DataFrame(roster_data).sort_values(by="Season OPS", ascending=False)
+                st.dataframe(df, hide_index=True, use_container_width=True)
             else:
-                st.info(f"No historical at-bats for {batter_name} vs {opp_pitcher_name}.")
-        else:
-            st.info("Awaiting opposing pitcher assignment for BvP stats.")
+                st.info("No offensive data found.")
 
     # ============================
     # TAB 2: PITCHERS
@@ -216,7 +224,7 @@ if data['totalGames'] > 0:
         st.markdown("### 🎯 The Confidence Engine")
         st.caption("Grades the roster objectively on 3 tests: Consistency (Hits in 7 of last 10 games), Performance (Season OPS > .750), and Matchup History (BvP AVG > .250).")
         
-        if st.button("Run Algorithm", type="primary"):
+        if st.button("Run Algorithm", type="primary", key="engine_btn"):
             if not opp_pitcher_id:
                 st.error("Cannot run full algorithm. Please select the opposing pitcher manually from the dropdown above.")
             else:
