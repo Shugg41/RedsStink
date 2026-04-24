@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # PAGE CONFIG
 st.set_page_config(page_title="Reds Prop Dashboard", page_icon="🔴", layout="wide")
@@ -88,14 +88,13 @@ def get_pitcher_hand(pitcher_id):
 
 # SIDEBAR AND GLOBAL
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/01/Cincinnati_Reds_Logo.svg/1200px-Cincinnati_Reds_Logo.svg.png", width=100)
+    st.image("https://a.espncdn.com/i/teamlogos/mlb/500/cin.png", width=100)
     st.title("Settings")
     selected_date = st.date_input("Select Game Date", datetime.now())
     date_str = selected_date.strftime("%Y-%m-%d")
     current_year = selected_date.year
 
 st.title("🔴 Reds Matchup & Prop Engine")
-st.markdown("Find your betting edges with real-time MLB API data, BvP matchups, and objective confidence ratings.")
 
 # MATCHUP ENGINE
 data = get_schedule(date_str)
@@ -143,77 +142,102 @@ if data['totalGames'] > 0:
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Matrix", "⚾ Pitcher Strikeouts", "🎯 The Confidence Engine"])
+    tab1, tab2 = st.tabs(["🏏 Offense Top 5", "⚾ Pitcher Strikeouts"])
 
-    # TAB 1: OFFENSE MATRIX
+    # TAB 1: OFFENSE TOP 5
     with tab1:
-        st.markdown("### ⚔️ Roster Matchup Matrix")
-        st.caption(f"Comparing overall season totals, specific splits vs {split_label}, and per-game averages over the last 5/10 starts.")
+        st.markdown("### 🏆 Top 5 Offensive Targets")
+        st.caption(f"Ranked by Confidence Score, Tiebreakers: OPS vs {split_label}, then L5 HRR/G.")
 
-        if st.button("Load Full Team Matrix", type="primary"):
-            progress_bar = st.progress(0, text="Calculating splits and recent trends...")
-            roster_data = []
-            total_hitters = len(hitters)
+        if st.button("Run Offensive Engine", type="primary"):
+            if not opp_pitcher_id:
+                st.error("Select pitcher first.")
+            else:
+                pb = st.progress(0, text="Evaluating roster...")
+                scan_results = []
+                total_hitters = len(hitters)
 
-            for i, (name, p_id) in enumerate(hitters.items()):
-                progress_bar.progress((i + 1) / total_hitters, text=f"Analyzing {name}...")
+                for i, (name, p_id) in enumerate(hitters.items()):
+                    pb.progress((i + 1) / total_hitters, text=f"Analyzing {name}...")
+                    
+                    points = 0
+                    traits = []
+                    
+                    # Test 1: Consistency & Recent Averages
+                    hit_games = 0
+                    l10_h_avg = 0.0
+                    l5_hrr_avg = 0.0
+                    
+                    logs = get_game_logs(p_id, current_year)
+                    if logs:
+                        l10_logs = logs[-10:]
+                        hit_games = sum(1 for g in l10_logs if g.get('stat', {}).get('hits', 0) > 0)
+                        if hit_games >= 7:
+                            points += 1
+                            traits.append("Consistent")
+                        
+                        if l10_logs:
+                            l10_h = sum(g.get('stat', {}).get('hits', 0) for g in l10_logs)
+                            l10_h_avg = round(l10_h / len(l10_logs), 1)
 
-                p_ops = ".000"
-                split_ops = ".000"
-                career_split_ops = ".000"
-                l5_h_avg, l5_hrr_avg = 0.0, 0.0
-                l10_h_avg, l10_hrr_avg = 0.0, 0.0
+                        l5_logs = logs[-5:]
+                        if l5_logs:
+                            l5_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l5_logs)
+                            l5_hrr_avg = round(l5_hrr / len(l5_logs), 1)
+                    
+                    # Test 2: vs LHP/RHP Performance
+                    best_split_ops = 0.0
+                    sp_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
+                    try:
+                        best_split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                    except: pass
+                    
+                    if best_split_ops == 0.0:
+                        c_data = get_career_splits(p_id, "hitting", split_code)
+                        try:
+                            best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                        except: pass
 
-                s_data = get_season_stats(p_id, "hitting", current_year)
-                try:
-                    stat = s_data['stats'][0]['splits'][0]['stat']
-                    p_ops = f"{float(stat.get('ops', '.000')):.3f}"
-                except: pass
-
-                split_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
-                try:
-                    sp_stat = split_data['stats'][0]['splits'][0]['stat']
-                    split_ops = f"{float(sp_stat.get('ops', '.000')):.3f}"
-                except: pass
-
-                career_data = get_career_splits(p_id, "hitting", split_code)
-                try:
-                    c_stat = career_data['stats'][0]['splits'][0]['stat']
-                    career_split_ops = f"{float(c_stat.get('ops', '.000')):.3f}"
-                except: pass
-
-                logs = get_game_logs(p_id, current_year)
-                if logs:
-                    l5_logs = logs[-5:]
-                    if l5_logs:
-                        l5_h = sum(g.get('stat', {}).get('hits', 0) for g in l5_logs)
-                        l5_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l5_logs)
-                        l5_h_avg = round(l5_h / len(l5_logs), 1)
-                        l5_hrr_avg = round(l5_hrr / len(l5_logs), 1)
-
-                    l10_logs = logs[-10:]
-                    if l10_logs:
-                        l10_h = sum(g.get('stat', {}).get('hits', 0) for g in l10_logs)
-                        l10_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10_logs)
-                        l10_h_avg = round(l10_h / len(l10_logs), 1)
-                        l10_hrr_avg = round(l10_hrr / len(l10_logs), 1)
-
-                roster_data.append({
-                    "Player": name,
-                    "Season OPS": p_ops,
-                    f"26 OPS vs {split_label}": split_ops,
-                    f"Career vs {split_label}": career_split_ops,
-                    "L5 Hits/G": l5_h_avg,
-                    "L5 HRR/G": l5_hrr_avg,
-                    "L10 Hits/G": l10_h_avg,
-                    "L10 HRR/G": l10_hrr_avg
-                })
-
-            progress_bar.empty()
-
-            if roster_data:
-                df = pd.DataFrame(roster_data).sort_values(by="L5 HRR/G", ascending=False)
-                st.dataframe(df, hide_index=True, use_container_width=True)
+                    if best_split_ops > 0.800:
+                        points += 1
+                        traits.append(f"Crushes {split_label}")
+                        
+                    # Test 3: History (BvP)
+                    bvp_avg = 0.0
+                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
+                    if bvp:
+                        bvp_avg = float(bvp.get('avg', 0))
+                        if bvp_avg > 0.250:
+                            points += 1
+                            traits.append("Owns Pitcher")
+                            
+                    tier = "🟢 Tier 1" if points == 3 else "🟡 Tier 2" if points == 2 else "🔴 Tier 3"
+                    
+                    scan_results.append({
+                        "Player": name, 
+                        "Tier": tier, 
+                        "Score": points,
+                        "Raw_OPS": best_split_ops,
+                        "L5_HRR": l5_hrr_avg,
+                        "L10_Hits": l10_h_avg,
+                        "OPS_Display": f"{best_split_ops:.3f}",
+                        "Edge": ", ".join(traits) if traits else "None"
+                    })
+                
+                pb.empty()
+                
+                if scan_results:
+                    df = pd.DataFrame(scan_results)
+                    df = df.sort_values(by=['Score', 'Raw_OPS', 'L5_HRR'], ascending=[False, False, False]).head(5)
+                    
+                    st.divider()
+                    for idx, (index, row) in enumerate(df.iterrows()):
+                        st.markdown(f"#### {idx + 1}. {row['Player']} [{row['Tier']}]")
+                        st.markdown(f"* **Edge:** {row['Edge']}")
+                        st.markdown(f"* **OPS vs {split_label}:** {row['OPS_Display']}")
+                        st.markdown(f"* **Last 5 HRR/G:** {row['L5_HRR']}")
+                        st.markdown(f"* **Last 10 Hits/G:** {row['L10_Hits']}")
+                        st.divider()
 
     # TAB 2: PITCHER STRIKEOUTS
     with tab2:
@@ -301,78 +325,6 @@ if data['totalGames'] > 0:
                 st.dataframe(df_hit, hide_index=True, use_container_width=True)
             else:
                 st.info(f"No historical at-bats for {opponent} vs {pitcher_name}.")
-
-    # TAB 3: THE CONFIDENCE ENGINE
-    with tab3:
-        st.markdown("### 🎯 The Confidence Engine")
-        st.caption(f"Grades the roster objectively based on recent consistency, performance vs {split_label}, and BvP history.")
-        if st.button("Run Algorithm", type="primary", key="engine_btn"):
-            if not opp_pitcher_id:
-                st.error("Select pitcher first.")
-            else:
-                pb = st.progress(0, text="Evaluating roster...")
-                scan_results = []
-                total_hitters = len(hitters)
-                
-                for i, (name, p_id) in enumerate(hitters.items()):
-                    pb.progress((i + 1) / total_hitters, text=f"Evaluating {name}...")
-                    points = 0
-                    traits = []
-                    
-                    # Test 1: Consistency
-                    hit_games = 0
-                    l10_total = 0
-                    logs = get_game_logs(p_id, current_year)
-                    if logs:
-                        recent_logs = logs[-10:]
-                        l10_total = len(recent_logs)
-                        hit_games = sum(1 for g in recent_logs if g.get('stat', {}).get('hits', 0) > 0)
-                        if hit_games >= 7:
-                            points += 1
-                            traits.append("Consistent")
-                    hit_str = f"{hit_games}/{l10_total}"
-                    
-                    # Test 2: vs LHP/RHP Performance
-                    best_split_ops = 0.0
-                    sp_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
-                    try:
-                        best_split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                    except: pass
-                    
-                    if best_split_ops == 0.0:
-                        c_data = get_career_splits(p_id, "hitting", split_code)
-                        try:
-                            best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                        except: pass
-
-                    if best_split_ops > 0.800:
-                        points += 1
-                        traits.append(f"Crushes {split_label}")
-                    ops_str = f"{best_split_ops:.3f}"
-                        
-                    # Test 3: History (BvP)
-                    bvp_avg = 0.0
-                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
-                    if bvp:
-                        bvp_avg = float(bvp.get('avg', 0))
-                        if bvp_avg > 0.250:
-                            points += 1
-                            traits.append("Owns Pitcher")
-                    bvp_str = f"{bvp_avg:.3f}"
-                            
-                    tier = "🟢 Tier 1" if points == 3 else "🟡 Tier 2" if points == 2 else "🔴 Tier 3"
-                    scan_results.append({
-                        "Player": name, 
-                        "Tier": tier, 
-                        "Score": points,
-                        "L10 Hit Games": hit_str,
-                        f"OPS vs {split_label}": ops_str,
-                        "BvP AVG": bvp_str,
-                        "Edge": ", ".join(traits) if traits else "None"
-                    })
-                
-                pb.empty()
-                st.dataframe(pd.DataFrame(scan_results).sort_values(by="Score", ascending=False), hide_index=True)
 
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
