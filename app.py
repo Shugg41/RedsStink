@@ -271,6 +271,3 @@ if data['totalGames'] > 0:
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
     st.info("Check **Tomorrow (April 24)** in the sidebar to scout the Tigers series. Framber Valdez (LHP) is the projected starter.")
-
-
-```
