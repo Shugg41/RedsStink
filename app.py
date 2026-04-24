@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -41,6 +42,25 @@ def get_bvp_stats(batter_id, pitcher_id):
     except (KeyError, IndexError):
         return None
 
+@st.cache_data(ttl=3600)
+def get_pitch_arsenal(pitcher_id, year):
+    if not pitcher_id: return []
+    url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats?stats=pitchArsenal&group=pitching&season={year}"
+    res = requests.get(url).json()
+    try:
+        return res['stats'][0]['splits']
+    except (KeyError, IndexError):
+        return []
+
+@st.cache_data(ttl=3600)
+def get_game_logs(player_id, year):
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group=hitting&season={year}"
+    res = requests.get(url).json()
+    try:
+        return res['stats'][0]['splits']
+    except (KeyError, IndexError):
+        return []
+
 # --- SIDEBAR & GLOBAL ---
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/01/Cincinnati_Reds_Logo.svg/1200px-Cincinnati_Reds_Logo.svg.png", width=100)
@@ -50,7 +70,7 @@ with st.sidebar:
     current_year = selected_date.year
 
 st.title("🔴 Reds Matchup & Prop Engine")
-st.markdown("Find your betting edges with real-time MLB API data, BvP matchups, and 7-day rolling performance metrics.")
+st.markdown("Find your betting edges with real-time MLB API data, BvP matchups, and objective confidence ratings.")
 
 # --- MATCHUP ENGINE ---
 data = get_schedule(date_str)
@@ -76,7 +96,7 @@ if data['totalGames'] > 0:
     if opp_pitcher_name != 'TBD':
         st.info(f"**Targeting Opposing Starter:** {opp_pitcher_name} (ID: {opp_pitcher_id})", icon="🎯")
     else:
-        st.warning("Opposing Pitcher: TBD (BvP stats will be unavailable)", icon="⚠️")
+        st.warning("Opposing Pitcher: TBD (BvP stats will be unavailable until lineup is submitted)", icon="⚠️")
     
     st.divider()
     
@@ -86,7 +106,7 @@ if data['totalGames'] > 0:
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
     # --- TABS ---
-    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Props (Hitters)", "⚾ Pitcher Props", "🔥 System Scans"])
+    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Props", "⚾ Pitcher Props", "🎯 The Confidence Engine"])
 
     # ----------------------------
     # TAB 1: BATTERS & BvP
@@ -102,15 +122,42 @@ if data['totalGames'] > 0:
         try:
             stat = s_data['stats'][0]['splits'][0]['stat']
             hrr = stat.get('hits', 0) + stat.get('runs', 0) + stat.get('rbi', 0)
+            ops_val = float(stat.get('ops', '.000'))
             
             st.markdown(f"### {current_year} Season Metrics")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("AVG", stat.get('avg', '.000'))
-            m2.metric("OPS", stat.get('ops', '.000'))
+            m2.metric("OPS", f"{ops_val:.3f}")
             m3.metric("Total Bases", stat.get('totalBases', 0))
             m4.metric("HRR (Hits+Runs+RBI)", hrr)
-        except (KeyError, IndexError):
+                
+        except (KeyError, IndexError, ValueError):
             st.warning(f"No {current_year} regular season stats found for {batter_name}.")
+
+        st.divider()
+
+        # Pitch Arsenal Scouting Report
+        st.markdown(f"### 🎯 Scouting Report: {opp_pitcher_name}'s Arsenal")
+        if opp_pitcher_id:
+            arsenal = get_pitch_arsenal(opp_pitcher_id, current_year)
+            if arsenal:
+                arsenal = sorted(arsenal, key=lambda x: x['stat'].get('usagePercentage', 0), reverse=True)
+                
+                a1, a2, a3 = st.columns(3)
+                cols = [a1, a2, a3]
+                
+                for i in range(min(len(arsenal), 3)):
+                    pitch = arsenal[i]
+                    p_name = pitch['stat']['type']['description']
+                    p_usage = pitch['stat'].get('usagePercentage', 0)
+                    p_speed = pitch['stat'].get('averageSpeed', 0)
+                    cols[i].metric(p_name, f"{p_usage}% Usage", f"{p_speed} mph")
+            else:
+                st.info(f"Pitch arsenal data not yet available for {opp_pitcher_name}.")
+        else:
+            st.info("Awaiting opposing pitcher announcement for arsenal breakdown.")
+
+        st.divider()
 
         # BvP Stats (Batter vs Pitcher)
         st.markdown("### ⚔️ Batter vs. Pitcher (BvP) History")
@@ -151,61 +198,80 @@ if data['totalGames'] > 0:
             st.warning(f"No {current_year} regular season stats found for {pitcher_name}.")
 
     # ----------------------------
-    # TAB 3: SYSTEM SCANS
+    # TAB 3: THE CONFIDENCE ENGINE
     # ----------------------------
     with tab3:
-        st.markdown("### 🔥 Find the Edge: Hot Hitters (Last 7 Days)")
-        st.caption("Scans the entire Reds roster to find the hottest bats based on HRR (Hits + Runs + RBIs) and Total Bases.")
+        st.markdown("### 🎯 The Confidence Engine")
+        st.caption("Grades the roster objectively on 3 tests: Consistency (Hits in 7 of last 10 games), Performance (Season OPS > .750), and Matchup History (BvP AVG > .250).")
         
-        if st.button("Run Prop Scanner", type="primary"):
-            progress_bar = st.progress(0, text="Initializing Scan...")
-            scan_results = []
-            
-            start_date = (selected_date - timedelta(days=7)).strftime("%Y-%m-%d")
-            end_date = date_str
-            
-            total_hitters = len(hitters)
-            
-            for i, (name, p_id) in enumerate(hitters.items()):
-                progress_bar.progress((i + 1) / total_hitters, text=f"Querying {name}...")
-                
-                url = f"https://statsapi.mlb.com/api/v1/people/{p_id}/stats?stats=byDateRange&startDate={start_date}&endDate={end_date}&group=hitting"
-                try:
-                    res = requests.get(url).json()
-                    if 'stats' in res and res['stats'] and res['stats'][0]['splits']:
-                        s = res['stats'][0]['splits'][0]['stat']
-                        hrr = s.get('hits', 0) + s.get('runs', 0) + s.get('rbi', 0)
-                        scan_results.append({
-                            "Player": name, 
-                            "HRR": hrr, 
-                            "Total Bases": s.get('totalBases', 0), 
-                            "AVG": float(s.get('avg', '.000')),
-                            "OPS": float(s.get('ops', '.000'))
-                        })
-                except Exception as e:
-                    pass # Silently skip players with no data in range
-            
-            progress_bar.empty()
-            
-            if scan_results:
-                df = pd.DataFrame(scan_results).sort_values(by="HRR", ascending=False).head(8)
-                
-                # Interactive Chart
-                fig = px.bar(
-                    df, x='Player', y='HRR', color='Total Bases',
-                    title=f"Top Trending Reds (Last 7 Days)",
-                    hover_data=['AVG', 'OPS'],
-                    color_continuous_scale='Reds',
-                    text_auto=True
-                )
-                fig.update_layout(xaxis_title="", yaxis_title="HRR (Hits + Runs + RBI)", template="plotly_dark")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Raw Data Expander
-                with st.expander("View Raw Scanner Data"):
-                    # Removed Pandas styling to prevent matplotlib ImportError on Streamlit Cloud
-                    st.dataframe(df, use_container_width=True)
+        if st.button("Run Algorithm", type="primary"):
+            if not opp_pitcher_id:
+                st.error("Cannot run full algorithm. The opposing pitcher is TBD, so we cannot calculate the BvP matchup test. Check back closer to first pitch.")
             else:
-                st.info("No active hitter data found for the last 7 days. (Is it the off-season?)")
+                progress_bar = st.progress(0, text="Evaluating roster...")
+                scan_results = []
+                total_hitters = len(hitters)
+                
+                for i, (name, p_id) in enumerate(hitters.items()):
+                    progress_bar.progress((i + 1) / total_hitters, text=f"Evaluating {name}...")
+                    
+                    points = 0
+                    traits = []
+                    
+                    # Test 1: Consistency (Hits in 7 of last 10 games)
+                    logs = get_game_logs(p_id, current_year)
+                    if logs:
+                        recent_logs = logs[-10:] # Get up to the last 10 games
+                        hit_games = sum(1 for game in recent_logs if game.get('stat', {}).get('hits', 0) > 0)
+                        if hit_games >= 7:
+                            points += 1
+                            traits.append(f"Consistent ({hit_games} of last 10 games with a hit)")
+                    
+                    # Test 2: Performance (Season OPS > .750)
+                    s_data = get_season_stats(p_id, "hitting", current_year)
+                    try:
+                        ops = float(s_data['stats'][0]['splits'][0]['stat'].get('ops', '.000'))
+                        if ops > 0.750:
+                            points += 1
+                            traits.append(f"Elite Baseline ({ops:.3f} OPS)")
+                    except (KeyError, IndexError, ValueError):
+                        pass
+                        
+                    # Test 3: Matchup History (BvP AVG > .250)
+                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
+                    if bvp:
+                        bvp_avg = float(bvp.get('avg', '.000'))
+                        if bvp_avg > 0.250:
+                            points += 1
+                            traits.append(f"Owns Matchup ({bvp_avg:.3f} BvP AVG)")
+                            
+                    # Map to Tiers
+                    if points == 3:
+                        tier = "🟢 Tier 1 (Core Play)"
+                    elif points == 2:
+                        tier = "🟡 Tier 2 (Playable)"
+                    else:
+                        tier = "🔴 Tier 3 (Fade)"
+                        
+                    scan_results.append({
+                        "Player": name,
+                        "Tier": tier,
+                        "Score": points,
+                        "Edge Identified": ", ".join(traits) if traits else "No edge found"
+                    })
+                
+                progress_bar.empty()
+                
+                if scan_results:
+                    df = pd.DataFrame(scan_results).sort_values(by="Score", ascending=False)
+                    # Clean up output table
+                    st.dataframe(df[['Player', 'Tier', 'Edge Identified']], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No data available to process.")
+
 else:
-    st.error(f"No Reds game scheduled for {selected_date.strftime('%b %d, %Y')}. Please pick another date from the sidebar.")
+    st.warning("🌴 **OFF DAY:** The Reds are resting today.")
+    st.info("Check **Tomorrow (April 24)** in the sidebar to scout the Tigers series. Framber Valdez (LHP) is the projected starter.")
+
+
+```
