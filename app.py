@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-import plotly.express as px
 
 # PAGE CONFIG
 st.set_page_config(page_title="Reds Prop Dashboard", page_icon="🔴", layout="wide")
@@ -14,6 +13,17 @@ st.markdown("""
     .metric-card { background-color: #1E1E1E; padding: 15px; border-radius: 10px; border-left: 5px solid #C6011F; }
     </style>
 """, unsafe_allow_html=True)
+
+# MATH HELPERS
+def calc_ip(ip_str):
+    try:
+        ip = str(ip_str)
+        if '.' in ip:
+            whole, partial = ip.split('.')
+            return int(whole) + (int(partial) / 3.0)
+        return int(ip)
+    except:
+        return 0.0
 
 # API HELPERS AND CACHING
 @st.cache_data(ttl=3600)
@@ -33,6 +43,20 @@ def get_season_stats(player_id, group, year, split=None):
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group={group}&season={year}&sitCode={split}"
     return requests.get(url).json()
 
+@st.cache_data(ttl=86400)
+def get_career_splits(player_id, group, split_code):
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCode={split_code}"
+    return requests.get(url).json()
+
+@st.cache_data(ttl=3600)
+def get_team_splits(team_id, year, split_code):
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=hitting&season={year}&sitCode={split_code}"
+    res = requests.get(url).json()
+    try:
+        return res['stats'][0]['splits'][0]['stat']
+    except (KeyError, IndexError):
+        return {}
+
 @st.cache_data(ttl=3600)
 def get_bvp_stats(batter_id, pitcher_id):
     if not pitcher_id: return None
@@ -44,18 +68,8 @@ def get_bvp_stats(batter_id, pitcher_id):
         return None
 
 @st.cache_data(ttl=3600)
-def get_pitch_arsenal(pitcher_id, year):
-    if not pitcher_id: return []
-    url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats?stats=pitchArsenal&group=pitching&season={year}"
-    res = requests.get(url).json()
-    try:
-        return res['stats'][0]['splits']
-    except (KeyError, IndexError):
-        return []
-
-@st.cache_data(ttl=3600)
-def get_game_logs(player_id, year):
-    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group=hitting&season={year}"
+def get_game_logs(player_id, year, group="hitting"):
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group={group}&season={year}"
     res = requests.get(url).json()
     try:
         return res['stats'][0]['splits']
@@ -129,36 +143,14 @@ if data['totalGames'] > 0:
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Matchups", "⚾ Pitcher Props", "🎯 The Confidence Engine"])
+    tab1, tab2, tab3 = st.tabs(["🏏 Offensive Matrix", "⚾ Pitcher Strikeouts", "🎯 The Confidence Engine"])
 
-    # TAB 1 FULL OFFENSE OVERVIEW
+    # TAB 1: OFFENSE MATRIX
     with tab1:
-        st.markdown(f"### 🎯 Scouting Report: {opp_pitcher_name}'s Arsenal")
-        if opp_pitcher_id:
-            arsenal = get_pitch_arsenal(opp_pitcher_id, current_year)
-            if arsenal:
-                arsenal = sorted(arsenal, key=lambda x: x['stat'].get('percentage', 0), reverse=True)
-                
-                a1, a2, a3 = st.columns(3)
-                cols = [a1, a2, a3]
-                
-                for i in range(min(len(arsenal), 3)):
-                    pitch = arsenal[i]
-                    p_name = pitch['stat']['type']['description']
-                    p_usage = round(pitch['stat'].get('percentage', 0), 1)
-                    p_speed = round(pitch['stat'].get('averageSpeed', 0), 1)
-                    cols[i].metric(p_name, f"{p_usage}%", f"{p_speed} mph")
-            else:
-                st.info("Arsenal data not available.")
-        else:
-            st.info("Select a pitcher to see arsenal.")
-
-        st.divider()
-
         st.markdown("### ⚔️ Roster Matchup Matrix")
-        st.caption(f"Comparing overall season totals, specific splits vs {split_label}, and last 7 games performance.")
+        st.caption(f"Comparing overall season totals, specific splits vs {split_label}, and per-game averages over the last 5/10 starts.")
 
-        if st.button("Load Full Team Comparison", type="primary"):
+        if st.button("Load Full Team Matrix", type="primary"):
             progress_bar = st.progress(0, text="Calculating splits and recent trends...")
             roster_data = []
             total_hitters = len(hitters)
@@ -168,8 +160,9 @@ if data['totalGames'] > 0:
 
                 p_ops = ".000"
                 split_ops = ".000"
-                l7_hits = 0
-                l7_hrr = 0
+                career_split_ops = ".000"
+                l5_h_avg, l5_hrr_avg = 0.0, 0.0
+                l10_h_avg, l10_hrr_avg = 0.0, 0.0
 
                 s_data = get_season_stats(p_id, "hitting", current_year)
                 try:
@@ -183,31 +176,121 @@ if data['totalGames'] > 0:
                     split_ops = f"{float(sp_stat.get('ops', '.000')):.3f}"
                 except: pass
 
+                career_data = get_career_splits(p_id, "hitting", split_code)
+                try:
+                    c_stat = career_data['stats'][0]['splits'][0]['stat']
+                    career_split_ops = f"{float(c_stat.get('ops', '.000')):.3f}"
+                except: pass
+
                 logs = get_game_logs(p_id, current_year)
                 if logs:
-                    recent = logs[-7:]
-                    l7_hits = sum(g.get('stat', {}).get('hits', 0) for g in recent)
-                    l7_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in recent)
+                    l5_logs = logs[-5:]
+                    if l5_logs:
+                        l5_h = sum(g.get('stat', {}).get('hits', 0) for g in l5_logs)
+                        l5_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l5_logs)
+                        l5_h_avg = round(l5_h / len(l5_logs), 1)
+                        l5_hrr_avg = round(l5_hrr / len(l5_logs), 1)
+
+                    l10_logs = logs[-10:]
+                    if l10_logs:
+                        l10_h = sum(g.get('stat', {}).get('hits', 0) for g in l10_logs)
+                        l10_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10_logs)
+                        l10_h_avg = round(l10_h / len(l10_logs), 1)
+                        l10_hrr_avg = round(l10_hrr / len(l10_logs), 1)
 
                 roster_data.append({
                     "Player": name,
                     "Season OPS": p_ops,
-                    f"OPS vs {split_label}": split_ops,
-                    "L7 Hits": l7_hits,
-                    "L7 HRR": l7_hrr
+                    f"26 OPS vs {split_label}": split_ops,
+                    f"Career vs {split_label}": career_split_ops,
+                    "L5 Hits/G": l5_h_avg,
+                    "L5 HRR/G": l5_hrr_avg,
+                    "L10 Hits/G": l10_h_avg,
+                    "L10 HRR/G": l10_hrr_avg
                 })
 
             progress_bar.empty()
 
             if roster_data:
-                df = pd.DataFrame(roster_data).sort_values(by="L7 HRR", ascending=False)
+                df = pd.DataFrame(roster_data).sort_values(by="L5 HRR/G", ascending=False)
                 st.dataframe(df, hide_index=True, use_container_width=True)
 
-    # TAB 2 PITCHERS
+    # TAB 2: PITCHER STRIKEOUTS
     with tab2:
-        st.write("Pitcher Analysis placeholder")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            pitcher_name = st.selectbox("Select Reds Pitcher", sorted(pitchers.keys()))
+            p_id = pitchers[pitcher_name]
+        
+        reds_pitcher_hand = get_pitcher_hand(p_id)
+        r_split_code = "vl" if reds_pitcher_hand == "L" else "vr"
+        r_split_label = "LHP" if reds_pitcher_hand == "L" else "RHP"
 
-    # TAB 3 THE CONFIDENCE ENGINE
+        st.markdown(f"### 🎯 Pitcher Form (Last 5 Starts)")
+        p_logs = get_game_logs(p_id, current_year, group="pitching")
+        if p_logs:
+            l5_p = p_logs[-5:]
+            total_k = sum(g.get('stat', {}).get('strikeOuts', 0) for g in l5_p)
+            total_ip = sum(calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) for g in l5_p)
+            total_pitches = sum(g.get('stat', {}).get('numberOfPitches', 0) for g in l5_p)
+            starts = len(l5_p)
+            
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Avg Strikeouts", round(total_k / starts, 1))
+            p2.metric("Avg Innings Pitched", round(total_ip / starts, 1))
+            p3.metric("Avg Pitch Count", int(total_pitches / starts))
+        else:
+            st.info(f"No 2026 pitching logs found for {pitcher_name}.")
+
+        st.divider()
+
+        st.markdown(f"### ⚠️ Opponent Target: {opponent} vs {r_split_label}")
+        opp_stats = get_team_splits(opp_team_id, current_year, r_split_code)
+        if opp_stats:
+            pa = opp_stats.get('plateAppearances', 0)
+            so = opp_stats.get('strikeOuts', 0)
+            if pa > 0:
+                team_k_rate = round((so / pa) * 100, 1)
+                st.metric("Team Strikeout Rate", f"{team_k_rate}%")
+                if team_k_rate > 24.0:
+                    st.success("High strikeout target. Good matchup for the over.")
+                elif team_k_rate < 20.0:
+                    st.error("Low strikeout target. Proceed with caution.")
+            else:
+                st.info("Insufficient team data vs this handedness.")
+        else:
+            st.info("Team split data unavailable.")
+
+        st.divider()
+
+        st.markdown("### ⚔️ BvP Strikeout Hit List")
+        st.caption(f"Historical strikeout rates for {opponent} hitters vs {pitcher_name}.")
+        
+        if st.button("Scan Opponent Lineup"):
+            pb = st.progress(0, text="Scanning opponent history...")
+            opp_roster_data = get_roster(opp_team_id)
+            opp_hitters = {p['person']['fullName']: p['person']['id'] for p in opp_roster_data if p['position']['abbreviation'] != 'P'}
+            
+            hit_list = []
+            for i, (name, ob_id) in enumerate(opp_hitters.items()):
+                pb.progress((i + 1) / len(opp_hitters), text=f"Checking {name}...")
+                bvp = get_bvp_stats(ob_id, p_id)
+                if bvp:
+                    pa = bvp.get('plateAppearances', 0)
+                    if pa > 0:
+                        so = bvp.get('strikeOuts', 0)
+                        k_pct = round((so / pa) * 100, 1)
+                        hit_list.append({"Batter": name, "Plate Appearances": pa, "Strikeouts": so, "K%": k_pct})
+            
+            pb.empty()
+            
+            if hit_list:
+                df_hit = pd.DataFrame(hit_list).sort_values(by="K%", ascending=False)
+                st.dataframe(df_hit, hide_index=True, use_container_width=True)
+            else:
+                st.info(f"No historical at-bats for {opponent} vs {pitcher_name}.")
+
+    # TAB 3: THE CONFIDENCE ENGINE
     with tab3:
         st.markdown("### 🎯 The Confidence Engine")
         if st.button("Run Algorithm", type="primary", key="engine_btn"):
