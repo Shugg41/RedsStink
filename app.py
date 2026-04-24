@@ -147,7 +147,7 @@ if data['totalGames'] > 0:
     # TAB 1: OFFENSE TOP 5
     with tab1:
         st.markdown("### 🏆 Top 5 Offensive Targets")
-        st.caption(f"Ranked by Confidence Score, Tiebreakers: OPS vs {split_label}, then L5 HRR/G.")
+        st.caption(f"Ranked by Confidence Score, Tiebreakers: OPS vs {split_label}, then L10 HRR/G.")
 
         if st.button("Run Offensive Engine", type="primary"):
             if not opp_pitcher_id:
@@ -166,7 +166,7 @@ if data['totalGames'] > 0:
                     # Test 1: Consistency & Recent Averages
                     hit_games = 0
                     l10_h_avg = 0.0
-                    l5_hrr_avg = 0.0
+                    l10_hrr_avg = 0.0
                     
                     logs = get_game_logs(p_id, current_year)
                     if logs:
@@ -180,10 +180,8 @@ if data['totalGames'] > 0:
                             l10_h = sum(g.get('stat', {}).get('hits', 0) for g in l10_logs)
                             l10_h_avg = round(l10_h / len(l10_logs), 1)
 
-                        l5_logs = logs[-5:]
-                        if l5_logs:
-                            l5_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l5_logs)
-                            l5_hrr_avg = round(l5_hrr / len(l5_logs), 1)
+                            l10_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10_logs)
+                            l10_hrr_avg = round(l10_hrr / len(l10_logs), 1)
                     
                     # Test 2: vs LHP/RHP Performance
                     best_split_ops = 0.0
@@ -218,7 +216,7 @@ if data['totalGames'] > 0:
                         "Tier": tier, 
                         "Score": points,
                         "Raw_OPS": best_split_ops,
-                        "L5_HRR": l5_hrr_avg,
+                        "L10_HRR": l10_hrr_avg,
                         "L10_Hits": l10_h_avg,
                         "OPS_Display": f"{best_split_ops:.3f}",
                         "Edge": ", ".join(traits) if traits else "None"
@@ -228,14 +226,14 @@ if data['totalGames'] > 0:
                 
                 if scan_results:
                     df = pd.DataFrame(scan_results)
-                    df = df.sort_values(by=['Score', 'Raw_OPS', 'L5_HRR'], ascending=[False, False, False]).head(5)
+                    df = df.sort_values(by=['Score', 'Raw_OPS', 'L10_HRR'], ascending=[False, False, False]).head(5)
                     
                     st.divider()
                     for idx, (index, row) in enumerate(df.iterrows()):
                         st.markdown(f"#### {idx + 1}. {row['Player']} [{row['Tier']}]")
                         st.markdown(f"* **Edge:** {row['Edge']}")
                         st.markdown(f"* **OPS vs {split_label}:** {row['OPS_Display']}")
-                        st.markdown(f"* **Last 5 HRR/G:** {row['L5_HRR']}")
+                        st.markdown(f"* **Last 10 HRR/G:** {row['L10_HRR']}")
                         st.markdown(f"* **Last 10 Hits/G:** {row['L10_Hits']}")
                         st.divider()
 
