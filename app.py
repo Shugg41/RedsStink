@@ -228,6 +228,7 @@ if data['totalGames'] > 0:
 
         st.markdown(f"### 🎯 Pitcher Form (Last 5 Starts)")
         p_logs = get_game_logs(p_id, current_year, group="pitching")
+        avg_k = 0.0
         if p_logs:
             l5_p = p_logs[-5:]
             total_k = sum(g.get('stat', {}).get('strikeOuts', 0) for g in l5_p)
@@ -235,9 +236,12 @@ if data['totalGames'] > 0:
             total_pitches = sum(g.get('stat', {}).get('numberOfPitches', 0) for g in l5_p)
             starts = len(l5_p)
             
+            avg_k = round(total_k / starts, 1)
+            avg_ip = round(total_ip / starts, 1)
+            
             p1, p2, p3 = st.columns(3)
-            p1.metric("Avg Strikeouts", round(total_k / starts, 1))
-            p2.metric("Avg Innings Pitched", round(total_ip / starts, 1))
+            p1.metric("Avg Strikeouts", avg_k)
+            p2.metric("Avg Innings Pitched", avg_ip)
             p3.metric("Avg Pitch Count", int(total_pitches / starts))
         else:
             st.info(f"No 2026 pitching logs found for {pitcher_name}.")
@@ -251,11 +255,19 @@ if data['totalGames'] > 0:
             so = opp_stats.get('strikeOuts', 0)
             if pa > 0:
                 team_k_rate = round((so / pa) * 100, 1)
-                st.metric("Team Strikeout Rate", f"{team_k_rate}%")
+                
+                league_avg_k_rate = 22.0
+                matchup_multiplier = team_k_rate / league_avg_k_rate
+                projected_k = round(avg_k * matchup_multiplier, 1)
+                
+                m1, m2 = st.columns(2)
+                m1.metric("Team Strikeout Rate", f"{team_k_rate}%")
+                m2.metric("Projected Strikeouts", projected_k, help="Pitcher's L5 Avg scaled by Opponent K-Rate compared to League Avg (22%).")
+                
                 if team_k_rate > 24.0:
-                    st.success("High strikeout target. Good matchup for the over.")
+                    st.success("High strikeout target. Matchup upgrades baseline expectations.")
                 elif team_k_rate < 20.0:
-                    st.error("Low strikeout target. Proceed with caution.")
+                    st.error("Low strikeout target. Matchup downgrades baseline expectations.")
             else:
                 st.info("Insufficient team data vs this handedness.")
         else:
@@ -294,73 +306,4 @@ if data['totalGames'] > 0:
     with tab3:
         st.markdown("### 🎯 The Confidence Engine")
         st.caption(f"Grades the roster objectively based on recent consistency, performance vs {split_label}, and BvP history.")
-        if st.button("Run Algorithm", type="primary", key="engine_btn"):
-            if not opp_pitcher_id:
-                st.error("Select pitcher first.")
-            else:
-                pb = st.progress(0, text="Evaluating roster...")
-                scan_results = []
-                total_hitters = len(hitters)
-                
-                for i, (name, p_id) in enumerate(hitters.items()):
-                    pb.progress((i + 1) / total_hitters, text=f"Evaluating {name}...")
-                    points = 0
-                    traits = []
-                    
-                    # Test 1: Consistency
-                    hit_games = 0
-                    l10_total = 0
-                    logs = get_game_logs(p_id, current_year)
-                    if logs:
-                        recent_logs = logs[-10:]
-                        l10_total = len(recent_logs)
-                        hit_games = sum(1 for g in recent_logs if g.get('stat', {}).get('hits', 0) > 0)
-                        if hit_games >= 7:
-                            points += 1
-                            traits.append("Consistent")
-                    hit_str = f"{hit_games}/{l10_total}"
-                    
-                    # Test 2: vs LHP/RHP Performance
-                    best_split_ops = 0.0
-                    sp_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
-                    try:
-                        best_split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                    except: pass
-                    
-                    if best_split_ops == 0.0:
-                        c_data = get_career_splits(p_id, "hitting", split_code)
-                        try:
-                            best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                        except: pass
-
-                    if best_split_ops > 0.800:
-                        points += 1
-                        traits.append(f"Crushes {split_label}")
-                    ops_str = f"{best_split_ops:.3f}"
-                        
-                    # Test 3: History (BvP)
-                    bvp_avg = 0.0
-                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
-                    if bvp:
-                        bvp_avg = float(bvp.get('avg', 0))
-                        if bvp_avg > 0.250:
-                            points += 1
-                            traits.append("Owns Pitcher")
-                    bvp_str = f"{bvp_avg:.3f}"
-                            
-                    tier = "🟢 Tier 1" if points == 3 else "🟡 Tier 2" if points == 2 else "🔴 Tier 3"
-                    scan_results.append({
-                        "Player": name, 
-                        "Tier": tier, 
-                        "Score": points,
-                        "L10 Hit Games": hit_str,
-                        f"OPS vs {split_label}": ops_str,
-                        "BvP AVG": bvp_str,
-                        "Edge": ", ".join(traits) if traits else "None"
-                    })
-                
-                pb.empty()
-                st.dataframe(pd.DataFrame(scan_results).sort_values(by="Score", ascending=False), hide_index=True)
-
-else:
-    st.warning("🌴 **OFF DAY:** The Reds are resting today.")
+        if st
