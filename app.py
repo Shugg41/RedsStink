@@ -113,7 +113,7 @@ if data['totalGames'] > 0:
     st.divider()
     
     # PULL REDS ROSTER
-    roster_res = get_roster(113) # 113 is Reds Team ID
+    roster_res = get_roster(113)
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
@@ -128,7 +128,8 @@ if data['totalGames'] > 0:
         if opp_pitcher_id:
             arsenal = get_pitch_arsenal(opp_pitcher_id, current_year)
             if arsenal:
-                arsenal = sorted(arsenal, key=lambda x: x['stat'].get('usagePercentage', 0), reverse=True)
+                # Fixed: API uses 'percentage' or 'count'
+                arsenal = sorted(arsenal, key=lambda x: x['stat'].get('percentage', 0), reverse=True)
                 
                 a1, a2, a3 = st.columns(3)
                 cols = [a1, a2, a3]
@@ -136,7 +137,7 @@ if data['totalGames'] > 0:
                 for i in range(min(len(arsenal), 3)):
                     pitch = arsenal[i]
                     p_name = pitch['stat']['type']['description']
-                    p_usage = pitch['stat'].get('usagePercentage', 0)
+                    p_usage = pitch['stat'].get('percentage', 0)
                     p_speed = pitch['stat'].get('averageSpeed', 0)
                     cols[i].metric(p_name, f"{p_usage}% Usage", f"{p_speed} mph")
             else:
