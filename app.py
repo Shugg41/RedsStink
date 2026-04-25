@@ -28,7 +28,8 @@ def calc_ip(ip_str):
 # API HELPERS AND CACHING
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}"
+    # Added hydrate=probablePitcher to automatically pull starters
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
     return requests.get(url).json()
 
 @st.cache_data(ttl=86400)
@@ -42,6 +43,19 @@ def get_season_stats(player_id, group, year, split=None):
     if split:
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group={group}&season={year}&sitCodes={split}"
     return requests.get(url).json()
+
+@st.cache_data(ttl=3600)
+def get_advanced_pitching(player_id, year):
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=pitching&season={year}"
+    res = requests.get(url).json()
+    stats = {}
+    try:
+        for split in res.get('stats', []):
+            if split['type']['displayName'] in ['season', 'seasonAdvanced']:
+                stats.update(split['splits'][0]['stat'])
+        return stats
+    except:
+        return {}
 
 @st.cache_data(ttl=86400)
 def get_career_splits(player_id, group, split_code):
@@ -146,6 +160,22 @@ if data['totalGames'] > 0:
 
     # TAB 1: OFFENSE TOP 5
     with tab1:
+        
+        # TARGET PROFILE SECTION
+        if opp_pitcher_id:
+            st.markdown(f"### 🎯 Target Profile: {opp_pitcher_name}")
+            adv_stats = get_advanced_pitching(opp_pitcher_id, current_year)
+            if adv_stats:
+                col_a, col_b, col_c, col_d, col_e = st.columns(5)
+                col_a.metric("ERA", adv_stats.get('era', '0.00'))
+                col_b.metric("WHIP", adv_stats.get('whip', '0.00'))
+                col_c.metric("K/9", adv_stats.get('strikeoutsPer9Inn', '0.00'))
+                col_d.metric("HR/9", adv_stats.get('homeRunsPer9', '0.00'))
+                col_e.metric("FIP", adv_stats.get('fip', '0.00'), help="Fielding Independent Pitching. Lower is better. Exposes luck.")
+            else:
+                st.info("Advanced stats currently unavailable for this pitcher.")
+            st.divider()
+
         st.markdown("### 🏆 Top 5 Offensive Targets")
         st.caption(f"Ranked by Confidence Score, Tiebreakers: OPS vs {split_label}, then L10 HRR/G.")
 
@@ -228,7 +258,6 @@ if data['totalGames'] > 0:
                     df = pd.DataFrame(scan_results)
                     df = df.sort_values(by=['Score', 'Raw_OPS', 'L10_HRR'], ascending=[False, False, False]).head(5)
                     
-                    st.divider()
                     for idx, (index, row) in enumerate(df.iterrows()):
                         st.markdown(f"#### {idx + 1}. {row['Player']} [{row['Tier']}]")
                         st.markdown(f"* **Edge:** {row['Edge']}")
