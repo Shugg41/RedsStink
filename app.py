@@ -28,9 +28,44 @@ def calc_ip(ip_str):
 # API HELPERS AND CACHING
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
-    # Added hydrate=probablePitcher to automatically pull starters
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
     return requests.get(url).json()
+
+@st.cache_data(ttl=300) # Short cache to catch live updates
+def get_game_starters(game_pk):
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+    try:
+        res = requests.get(url).json()
+        starters = {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
+        
+        # 1. Try probable pitchers first
+        probables = res.get('gameData', {}).get('probablePitchers', {})
+        if 'away' in probables:
+            starters['away'] = {'id': probables['away']['id'], 'name': probables['away']['fullName']}
+        if 'home' in probables:
+            starters['home'] = {'id': probables['home']['id'], 'name': probables['home']['fullName']}
+            
+        # 2. Fallback to live boxscore if game is live and probable is wiped
+        status = res.get('gameData', {}).get('status', {}).get('statusCode', '')
+        if status in ['I', 'F', 'O', 'CR'] or starters['away']['name'] == 'TBD':
+            away_pitchers = res.get('liveData', {}).get('boxscore', {}).get('teams', {}).get('away', {}).get('pitchers', [])
+            if away_pitchers:
+                p_id = away_pitchers[0]
+                player = res.get('gameData', {}).get('players', {}).get(f"ID{p_id}", {})
+                if player:
+                    starters['away'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
+                    
+        if status in ['I', 'F', 'O', 'CR'] or starters['home']['name'] == 'TBD':
+            home_pitchers = res.get('liveData', {}).get('boxscore', {}).get('teams', {}).get('home', {}).get('pitchers', [])
+            if home_pitchers:
+                p_id = home_pitchers[0]
+                player = res.get('gameData', {}).get('players', {}).get(f"ID{p_id}", {})
+                if player:
+                    starters['home'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
+                    
+        return starters
+    except:
+        return {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
 
 @st.cache_data(ttl=86400)
 def get_roster(team_id):
@@ -113,22 +148,35 @@ st.title("🔴 Reds Matchup & Prop Engine")
 # MATCHUP ENGINE
 data = get_schedule(date_str)
 
+reds_pitcher_name = "TBD"
+reds_pitcher_id = None
+
 if data['totalGames'] > 0:
     game = data['dates'][0]['games'][0]
+    game_pk = game['gamePk']
+    
+    # Check live feed for starters to bypass TBD glitch
+    starters = get_game_starters(game_pk)
+    
     away_team = game['teams']['away']['team']['name']
     home_team = game['teams']['home']['team']['name']
     
     if "Reds" in away_team:
         opponent = home_team
         opp_team_id = game['teams']['home']['team']['id']
-        opp_pitcher_data = game['teams']['home'].get('probablePitcher', {})
+        opp_pitcher_name = starters['home']['name']
+        opp_pitcher_id = starters['home']['id']
+        
+        reds_pitcher_name = starters['away']['name']
+        reds_pitcher_id = starters['away']['id']
     else:
         opponent = away_team
         opp_team_id = game['teams']['away']['team']['id']
-        opp_pitcher_data = game['teams']['away'].get('probablePitcher', {})
-
-    opp_pitcher_name = opp_pitcher_data.get('fullName', 'TBD')
-    opp_pitcher_id = opp_pitcher_data.get('id', None)
+        opp_pitcher_name = starters['away']['name']
+        opp_pitcher_id = starters['away']['id']
+        
+        reds_pitcher_name = starters['home']['name']
+        reds_pitcher_id = starters['home']['id']
 
     st.subheader(f"🏟️ Matchup: Reds vs {opponent}")
     
@@ -269,8 +317,14 @@ if data['totalGames'] > 0:
     # TAB 2: PITCHER STRIKEOUTS
     with tab2:
         col1, col2 = st.columns([1, 2])
+        
+        reds_pitchers_list = sorted(pitchers.keys())
+        default_idx = 0
+        if reds_pitcher_name in reds_pitchers_list:
+            default_idx = reds_pitchers_list.index(reds_pitcher_name)
+            
         with col1:
-            pitcher_name = st.selectbox("Select Reds Pitcher", sorted(pitchers.keys()))
+            pitcher_name = st.selectbox("Select Reds Pitcher", reds_pitchers_list, index=default_idx)
             p_id = pitchers[pitcher_name]
         
         reds_pitcher_hand = get_pitcher_hand(p_id)
