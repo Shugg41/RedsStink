@@ -31,21 +31,19 @@ def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
     return requests.get(url).json()
 
-@st.cache_data(ttl=300) # Short cache to catch live updates
+@st.cache_data(ttl=300) 
 def get_game_starters(game_pk):
     url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
     try:
         res = requests.get(url).json()
         starters = {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
         
-        # 1. Try probable pitchers first
         probables = res.get('gameData', {}).get('probablePitchers', {})
         if 'away' in probables:
             starters['away'] = {'id': probables['away']['id'], 'name': probables['away']['fullName']}
         if 'home' in probables:
             starters['home'] = {'id': probables['home']['id'], 'name': probables['home']['fullName']}
             
-        # 2. Fallback to live boxscore if game is live and probable is wiped
         status = res.get('gameData', {}).get('status', {}).get('statusCode', '')
         if status in ['I', 'F', 'O', 'CR'] or starters['away']['name'] == 'TBD':
             away_pitchers = res.get('liveData', {}).get('boxscore', {}).get('teams', {}).get('away', {}).get('pitchers', [])
@@ -150,12 +148,15 @@ data = get_schedule(date_str)
 
 reds_pitcher_name = "TBD"
 reds_pitcher_id = None
+opp_pitcher_name = "TBD"
+opp_pitcher_id = None
+opponent = "Unknown"
+opp_team_id = None
 
 if data['totalGames'] > 0:
     game = data['dates'][0]['games'][0]
     game_pk = game['gamePk']
     
-    # Check live feed for starters to bypass TBD glitch
     starters = get_game_starters(game_pk)
     
     away_team = game['teams']['away']['team']['name']
@@ -204,28 +205,40 @@ if data['totalGames'] > 0:
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-    tab1, tab2 = st.tabs(["🏏 Offense Top 5", "⚾ Pitcher Strikeouts"])
+    tab1, tab2 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts"])
 
-    # TAB 1: OFFENSE TOP 5
+    # TAB 1: OFFENSE MATCHUPS
     with tab1:
+        adv_stats = {}
+        pitcher_era_val = 3.50
+        pitcher_score = 0
         
         # TARGET PROFILE SECTION
         if opp_pitcher_id:
             st.markdown(f"### 🎯 Target Profile: {opp_pitcher_name}")
             adv_stats = get_advanced_pitching(opp_pitcher_id, current_year)
             if adv_stats:
+                try:
+                    pitcher_era_val = float(adv_stats.get('era', '3.50'))
+                except:
+                    pitcher_era_val = 3.50
+                    
+                pitcher_score = 10 if pitcher_era_val >= 4.50 else (5 if pitcher_era_val >= 3.50 else 0)
+                
+                fip_val = adv_stats.get('fip', adv_stats.get('fieldingIndependentPitching', '0.00'))
+                
                 col_a, col_b, col_c, col_d, col_e = st.columns(5)
                 col_a.metric("ERA", adv_stats.get('era', '0.00'))
                 col_b.metric("WHIP", adv_stats.get('whip', '0.00'))
                 col_c.metric("K/9", adv_stats.get('strikeoutsPer9Inn', '0.00'))
                 col_d.metric("HR/9", adv_stats.get('homeRunsPer9', '0.00'))
-                col_e.metric("FIP", adv_stats.get('fip', '0.00'), help="Fielding Independent Pitching. Lower is better. Exposes luck.")
+                col_e.metric("FIP", fip_val, help="Fielding Independent Pitching. Lower is better. Exposes luck.")
             else:
                 st.info("Advanced stats currently unavailable for this pitcher.")
             st.divider()
 
-        st.markdown("### 🏆 Top 5 Offensive Targets")
-        st.caption(f"Ranked by Confidence Score, Tiebreakers: OPS vs {split_label}, then L10 HRR/G.")
+        st.markdown("### 🏆 Reds Hitting Board (100-Point Scale)")
+        st.caption(f"Graded on Split Advantage (40), Form (40), Pitcher Vulnerability (10), and BvP History (10).")
 
         if st.button("Run Offensive Engine", type="primary"):
             if not opp_pitcher_id:
@@ -238,28 +251,24 @@ if data['totalGames'] > 0:
                 for i, (name, p_id) in enumerate(hitters.items()):
                     pb.progress((i + 1) / total_hitters, text=f"Analyzing {name}...")
                     
-                    points = 0
-                    traits = []
-                    
-                    # Test 1: Consistency & Recent Averages
+                    # Test 1: Recent Form Averages
                     hit_games = 0
+                    l10_total = 0
                     l10_h_avg = 0.0
                     l10_hrr_avg = 0.0
                     
                     logs = get_game_logs(p_id, current_year)
                     if logs:
                         l10_logs = logs[-10:]
+                        l10_total = len(l10_logs)
                         hit_games = sum(1 for g in l10_logs if g.get('stat', {}).get('hits', 0) > 0)
-                        if hit_games >= 7:
-                            points += 1
-                            traits.append("Consistent")
                         
-                        if l10_logs:
+                        if l10_total > 0:
                             l10_h = sum(g.get('stat', {}).get('hits', 0) for g in l10_logs)
-                            l10_h_avg = round(l10_h / len(l10_logs), 1)
+                            l10_h_avg = round(l10_h / l10_total, 1)
 
                             l10_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10_logs)
-                            l10_hrr_avg = round(l10_hrr / len(l10_logs), 1)
+                            l10_hrr_avg = round(l10_hrr / l10_total, 1)
                     
                     # Test 2: vs LHP/RHP Performance
                     best_split_ops = 0.0
@@ -273,45 +282,51 @@ if data['totalGames'] > 0:
                         try:
                             best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
                         except: pass
-
-                    if best_split_ops > 0.800:
-                        points += 1
-                        traits.append(f"Crushes {split_label}")
                         
                     # Test 3: History (BvP)
                     bvp_avg = 0.0
                     bvp = get_bvp_stats(p_id, opp_pitcher_id)
                     if bvp:
                         bvp_avg = float(bvp.get('avg', 0))
-                        if bvp_avg > 0.250:
-                            points += 1
-                            traits.append("Owns Pitcher")
-                            
-                    tier = "🟢 Tier 1" if points == 3 else "🟡 Tier 2" if points == 2 else "🔴 Tier 3"
+                    
+                    # MATH: 100-Point Scale
+                    split_score = int(min(40, max(0, (best_split_ops - 0.500) * 100)))
+                    
+                    consistency_score = int((hit_games / 10.0) * 20) if l10_total > 0 else 0
+                    hrr_score = int(min(20, (l10_hrr_avg / 2.5) * 20))
+                    
+                    bvp_score = 10 if bvp_avg >= 0.300 else (5 if bvp_avg >= 0.200 else 0)
+                    
+                    total_score = split_score + consistency_score + hrr_score + pitcher_score + bvp_score
+                    
+                    tier = "🟢 Tier 1" if total_score >= 80 else "🟡 Tier 2" if total_score >= 60 else "🔴 Tier 3"
                     
                     scan_results.append({
                         "Player": name, 
                         "Tier": tier, 
-                        "Score": points,
+                        "Score": total_score,
                         "Raw_OPS": best_split_ops,
                         "L10_HRR": l10_hrr_avg,
                         "L10_Hits": l10_h_avg,
-                        "OPS_Display": f"{best_split_ops:.3f}",
-                        "Edge": ", ".join(traits) if traits else "None"
+                        "BVP_Avg": bvp_avg,
+                        "OPS_Display": f"{best_split_ops:.3f}"
                     })
                 
                 pb.empty()
                 
                 if scan_results:
                     df = pd.DataFrame(scan_results)
-                    df = df.sort_values(by=['Score', 'Raw_OPS', 'L10_HRR'], ascending=[False, False, False]).head(5)
+                    df = df.sort_values(by=['Score', 'Raw_OPS', 'L10_HRR'], ascending=[False, False, False])
                     
                     for idx, (index, row) in enumerate(df.iterrows()):
-                        st.markdown(f"#### {idx + 1}. {row['Player']} [{row['Tier']}]")
-                        st.markdown(f"* **Edge:** {row['Edge']}")
-                        st.markdown(f"* **OPS vs {split_label}:** {row['OPS_Display']}")
-                        st.markdown(f"* **Last 10 HRR/G:** {row['L10_HRR']}")
-                        st.markdown(f"* **Last 10 Hits/G:** {row['L10_Hits']}")
+                        st.markdown(f"#### {idx + 1}. {row['Player']} - {row['Score']}/100 [{row['Tier']}]")
+                        
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric(f"OPS vs {split_label}", row['OPS_Display'])
+                        m2.metric("L10 HRR/G", row['L10_HRR'])
+                        m3.metric("L10 Hits/G", row['L10_Hits'])
+                        m4.metric("BvP AVG", f"{row['BVP_Avg']:.3f}")
+                        
                         st.divider()
 
     # TAB 2: PITCHER STRIKEOUTS
