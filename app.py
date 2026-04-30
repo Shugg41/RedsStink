@@ -14,6 +14,77 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# SUPABASE CONFIG
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    DB_HEADERS = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+except:
+    SUPABASE_URL = None
+    DB_HEADERS = None
+
+# LAZY AUTOMATION
+def auto_grade_past_predictions():
+    if not SUPABASE_URL: return
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
+    url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&date=lt.{today_str}&select=date"
+    res = requests.get(url, headers=DB_HEADERS)
+    
+    if res.status_code != 200 or not res.json(): return
+    
+    dates_to_grade = list(set([row['date'] for row in res.json()]))
+
+    for d in dates_to_grade:
+        sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}"
+        try:
+            sched = requests.get(sched_url).json()
+            if sched['totalGames'] > 0:
+                game = sched['dates'][0]['games'][0]
+                status = game['status']['statusCode']
+                
+                if status in ['F', 'O', 'CR']:
+                    game_pk = game['gamePk']
+                    feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+                    feed = requests.get(feed_url).json()
+                    box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
+                    
+                    if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
+                        reds_batters = box.get('away', {}).get('batters', [])
+                        players_dict = box.get('away', {}).get('players', {})
+                    else:
+                        reds_batters = box.get('home', {}).get('batters', [])
+                        players_dict = box.get('home', {}).get('players', {})
+                    
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", 
+                                 json={"graded": 1, "win": -1}, headers=DB_HEADERS)
+                    
+                    for p_id in reds_batters:
+                        p_key = f"ID{p_id}"
+                        stats = players_dict.get(p_key, {}).get('stats', {}).get('batting', {})
+                        pa = stats.get('plateAppearances', 0)
+                        
+                        if pa > 0:
+                            hits = stats.get('hits', 0)
+                            runs = stats.get('runs', 0)
+                            rbi = stats.get('rbi', 0)
+                            hrr = hits + runs + rbi
+                            win = 1 if (hits > 0 or hrr > 1) else 0
+                            
+                            requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
+                                         json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, 
+                                         headers=DB_HEADERS)
+        except:
+            pass
+
+# Run DB checks instantly on load
+auto_grade_past_predictions()
+
 # MATH HELPERS
 def calc_ip(ip_str):
     try:
@@ -27,7 +98,6 @@ def calc_ip(ip_str):
 
 def calculate_fip(stats):
     try:
-        # Check API first, fallback to native math
         api_fip = stats.get('fip', stats.get('fieldingIndependentPitching', '0.00'))
         if api_fip != '0.00' and api_fip != '-.--':
             return f"{float(api_fip):.2f}"
@@ -38,10 +108,8 @@ def calculate_fip(stats):
         k = int(stats.get('strikeOuts', 0))
         ip = calc_ip(stats.get('inningsPitched', '0.0'))
         
-        if ip <= 0:
-            return "0.00"
+        if ip <= 0: return "0.00"
             
-        # Standard FIP Formula with 3.20 league constant
         fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.20
         return f"{max(0, fip):.2f}"
     except:
@@ -72,16 +140,14 @@ def get_game_starters(game_pk):
             if away_pitchers:
                 p_id = away_pitchers[0]
                 player = res.get('gameData', {}).get('players', {}).get(f"ID{p_id}", {})
-                if player:
-                    starters['away'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
+                if player: starters['away'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
                     
         if status in ['I', 'F', 'O', 'CR'] or starters['home']['name'] == 'TBD':
             home_pitchers = res.get('liveData', {}).get('boxscore', {}).get('teams', {}).get('home', {}).get('pitchers', [])
             if home_pitchers:
                 p_id = home_pitchers[0]
                 player = res.get('gameData', {}).get('players', {}).get(f"ID{p_id}", {})
-                if player:
-                    starters['home'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
+                if player: starters['home'] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
                     
         return starters
     except:
@@ -227,7 +293,7 @@ if data['totalGames'] > 0:
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-    tab1, tab2 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts"])
+    tab1, tab2, tab3 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts", "📊 System Tracker"])
 
     # TAB 1: OFFENSE MATCHUPS
     with tab1:
@@ -235,7 +301,6 @@ if data['totalGames'] > 0:
         pitcher_era_val = 3.50
         pitcher_score = 0
         
-        # TARGET PROFILE SECTION
         if opp_pitcher_id:
             st.markdown(f"### 🎯 Target Profile: {opp_pitcher_name}")
             adv_stats = get_advanced_pitching(opp_pitcher_id, current_year)
@@ -246,7 +311,6 @@ if data['totalGames'] > 0:
                     pitcher_era_val = 3.50
                     
                 pitcher_score = 10 if pitcher_era_val >= 4.50 else (5 if pitcher_era_val >= 3.50 else 0)
-                
                 fip_val = calculate_fip(adv_stats)
                 
                 col_a, col_b, col_c, col_d, col_e = st.columns(5)
@@ -273,7 +337,6 @@ if data['totalGames'] > 0:
                 for i, (name, p_id) in enumerate(hitters.items()):
                     pb.progress((i + 1) / total_hitters, text=f"Analyzing {name}...")
                     
-                    # Test 1: Recent Form Averages
                     hit_games = 0
                     l10_total = 0
                     l10_h_avg = 0.0
@@ -292,39 +355,31 @@ if data['totalGames'] > 0:
                             l10_hrr = sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10_logs)
                             l10_hrr_avg = round(l10_hrr / l10_total, 1)
                     
-                    # Test 2: vs LHP/RHP Performance
                     best_split_ops = 0.0
                     sp_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
-                    try:
-                        best_split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                    try: best_split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
                     except: pass
                     
                     if best_split_ops == 0.0:
                         c_data = get_career_splits(p_id, "hitting", split_code)
-                        try:
-                            best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                        try: best_split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
                         except: pass
                         
-                    # Test 3: History (BvP)
                     bvp_avg = 0.0
                     bvp = get_bvp_stats(p_id, opp_pitcher_id)
-                    if bvp:
-                        bvp_avg = float(bvp.get('avg', 0))
+                    if bvp: bvp_avg = float(bvp.get('avg', 0))
                     
-                    # MATH: 100-Point Scale
                     split_score = int(min(40, max(0, (best_split_ops - 0.500) * 100)))
-                    
                     consistency_score = int((hit_games / 10.0) * 20) if l10_total > 0 else 0
                     hrr_score = int(min(20, (l10_hrr_avg / 2.5) * 20))
-                    
                     bvp_score = 10 if bvp_avg >= 0.300 else (5 if bvp_avg >= 0.200 else 0)
                     
                     total_score = split_score + consistency_score + hrr_score + pitcher_score + bvp_score
-                    
                     tier = "🟢 Tier 1" if total_score >= 80 else "🟡 Tier 2" if total_score >= 60 else "🔴 Tier 3"
                     
                     scan_results.append({
                         "Player": name, 
+                        "Player_ID": p_id,
                         "Tier": tier, 
                         "Score": total_score,
                         "Raw_OPS": best_split_ops,
@@ -335,6 +390,18 @@ if data['totalGames'] > 0:
                     })
                 
                 pb.empty()
+                
+                if SUPABASE_URL:
+                    check_url = f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}&select=date"
+                    if not requests.get(check_url, headers=DB_HEADERS).json():
+                        insert_data = []
+                        for res in scan_results:
+                            insert_data.append({
+                                "date": date_str, "player_id": res['Player_ID'], "player_name": res['Player'],
+                                "score": res['Score'], "tier": res['Tier'], "opp_pitcher": opp_pitcher_name,
+                                "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0
+                            })
+                        requests.post(f"{SUPABASE_URL}/rest/v1/predictions", json=insert_data, headers=DB_HEADERS)
                 
                 if scan_results:
                     df = pd.DataFrame(scan_results)
@@ -397,7 +464,6 @@ if data['totalGames'] > 0:
             so = opp_stats.get('strikeOuts', 0)
             if pa > 0:
                 team_k_rate = round((so / pa) * 100, 1)
-                
                 league_avg_k_rate = 22.0
                 matchup_multiplier = team_k_rate / league_avg_k_rate
                 projected_k = round(avg_k * matchup_multiplier, 1)
@@ -406,10 +472,8 @@ if data['totalGames'] > 0:
                 m1.metric("Team Strikeout Rate", f"{team_k_rate}%")
                 m2.metric("Projected Strikeouts", projected_k, help="Pitcher's L5 Avg scaled by Opponent K-Rate compared to League Avg (22%).")
                 
-                if team_k_rate > 24.0:
-                    st.success("High strikeout target. Matchup upgrades baseline expectations.")
-                elif team_k_rate < 20.0:
-                    st.error("Low strikeout target. Matchup downgrades baseline expectations.")
+                if team_k_rate > 24.0: st.success("High strikeout target. Matchup upgrades baseline expectations.")
+                elif team_k_rate < 20.0: st.error("Low strikeout target. Matchup downgrades baseline expectations.")
             else:
                 st.info("Insufficient team data vs this handedness.")
         else:
@@ -443,6 +507,45 @@ if data['totalGames'] > 0:
                 st.dataframe(df_hit, hide_index=True, use_container_width=True)
             else:
                 st.info(f"No historical at-bats for {opponent} vs {pitcher_name}.")
+
+    # TAB 3: SYSTEM TRACKER
+    with tab3:
+        st.markdown("### 📊 Engine Performance")
+        st.caption("Tracks real-world Hit and HRR production against the 100-point score. Win = >0 Hits OR >1 HRR.")
+        
+        if SUPABASE_URL:
+            res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.1", headers=DB_HEADERS)
+            if res.status_code == 200 and res.json():
+                df_track = pd.DataFrame(res.json())
+                df_active = df_track[df_track['win'] != -1]
+                
+                if not df_active.empty:
+                    win_rate = (df_active['win'].sum() / len(df_active)) * 100
+                    st.metric("Overall System Win Rate", f"{win_rate:.1f}%")
+                    st.divider()
+                    
+                    st.markdown("#### Performance by Tier")
+                    tier_grp = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
+                    
+                    cols = st.columns(len(tier_grp))
+                    for idx, row in tier_grp.iterrows():
+                        cols[idx].metric(row['tier'], f"{row['mean'] * 100:.1f}%", f"{int(row['count'])} plays")
+                    
+                    st.divider()
+                    st.markdown("#### Recent Graded Game Logs")
+                    df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'actual_hrr', 'win']]
+                    df_display = df_display.sort_values(by='date', ascending=False)
+                    
+                    df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
+                    df_display = df_display.drop(columns=['win'])
+                    
+                    st.dataframe(df_display, hide_index=True, use_container_width=True)
+                else:
+                    st.info("Games have been graded, but no active player data was found. Wait for tomorrow's games to final.")
+            else:
+                st.info("No games have been graded yet. The system grades yesterday's games automatically when you open the app.")
+        else:
+            st.error("Supabase connection missing. Check Streamlit Secrets.")
 
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
