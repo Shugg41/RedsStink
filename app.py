@@ -25,6 +25,28 @@ def calc_ip(ip_str):
     except:
         return 0.0
 
+def calculate_fip(stats):
+    try:
+        # Check API first, fallback to native math
+        api_fip = stats.get('fip', stats.get('fieldingIndependentPitching', '0.00'))
+        if api_fip != '0.00' and api_fip != '-.--':
+            return f"{float(api_fip):.2f}"
+            
+        hr = int(stats.get('homeRuns', 0))
+        bb = int(stats.get('baseOnBalls', 0))
+        hbp = int(stats.get('hitBatsmen', stats.get('hitByPitch', 0)))
+        k = int(stats.get('strikeOuts', 0))
+        ip = calc_ip(stats.get('inningsPitched', '0.0'))
+        
+        if ip <= 0:
+            return "0.00"
+            
+        # Standard FIP Formula with 3.20 league constant
+        fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.20
+        return f"{max(0, fip):.2f}"
+    except:
+        return "0.00"
+
 # API HELPERS AND CACHING
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
@@ -225,7 +247,7 @@ if data['totalGames'] > 0:
                     
                 pitcher_score = 10 if pitcher_era_val >= 4.50 else (5 if pitcher_era_val >= 3.50 else 0)
                 
-                fip_val = adv_stats.get('fip', adv_stats.get('fieldingIndependentPitching', '0.00'))
+                fip_val = calculate_fip(adv_stats)
                 
                 col_a, col_b, col_c, col_d, col_e = st.columns(5)
                 col_a.metric("ERA", adv_stats.get('era', '0.00'))
