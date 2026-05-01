@@ -350,7 +350,17 @@ if data['totalGames'] > 0:
         st.markdown("### 🏆 Reds Hitting Board (100-Point Scale)")
         st.caption("Graded on Split Advantage (40), Form (40), Pitcher Vulnerability (10), and BvP History (10).")
         
-        show_only_starters = st.checkbox("Hide bench players (requires official lineup)", value=False)
+        lineup_ready = len(reds_batting_order) > 0
+        if lineup_ready:
+            st.success("✅ Official Lineup Confirmed")
+        else:
+            st.warning("⏳ Waiting on Official Lineup...")
+            
+        show_only_starters = st.checkbox(
+            "Hide bench players (requires official lineup)", 
+            value=False, 
+            disabled=not lineup_ready
+        )
 
         if st.button("Run Offensive Engine", type="primary"):
             if not opp_pitcher_id:
