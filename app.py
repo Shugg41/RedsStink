@@ -178,6 +178,15 @@ def get_advanced_pitching(player_id, year):
     except:
         return {}
 
+@st.cache_data(ttl=3600)
+def get_team_pitching(team_id, year):
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=pitching&season={year}&sitCodes=rp"
+    res = requests.get(url).json()
+    try:
+        return res['stats'][0]['splits'][0]['stat']
+    except (KeyError, IndexError):
+        return {}
+
 @st.cache_data(ttl=86400)
 def get_career_splits(player_id, group, split_code):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCodes={split_code}"
@@ -293,6 +302,18 @@ if data['totalGames'] > 0:
     hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
     pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
+    # Fetch live feed for lineup extraction
+    feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+    try:
+        live_feed = requests.get(feed_url).json()
+        boxscore = live_feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
+        if "Reds" in away_team:
+            reds_batting_order = boxscore.get('away', {}).get('battingOrder', [])
+        else:
+            reds_batting_order = boxscore.get('home', {}).get('battingOrder', [])
+    except:
+        reds_batting_order = []
+
     tab1, tab2, tab3 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts", "📊 System Tracker"])
 
     # TAB 1: OFFENSE MATCHUPS
@@ -304,6 +325,8 @@ if data['totalGames'] > 0:
         if opp_pitcher_id:
             st.markdown(f"### 🎯 Target Profile: {opp_pitcher_name}")
             adv_stats = get_advanced_pitching(opp_pitcher_id, current_year)
+            opp_team_staff = get_team_pitching(opp_team_id, current_year)
+            
             if adv_stats:
                 try:
                     pitcher_era_val = float(adv_stats.get('era', '3.50'))
@@ -313,18 +336,21 @@ if data['totalGames'] > 0:
                 pitcher_score = 10 if pitcher_era_val >= 4.50 else (5 if pitcher_era_val >= 3.50 else 0)
                 fip_val = calculate_fip(adv_stats)
                 
-                col_a, col_b, col_c, col_d, col_e = st.columns(5)
+                col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
                 col_a.metric("ERA", adv_stats.get('era', '0.00'))
                 col_b.metric("WHIP", adv_stats.get('whip', '0.00'))
                 col_c.metric("K/9", adv_stats.get('strikeoutsPer9Inn', '0.00'))
                 col_d.metric("HR/9", adv_stats.get('homeRunsPer9', '0.00'))
-                col_e.metric("FIP", fip_val, help="Fielding Independent Pitching. Lower is better. Exposes luck.")
+                col_e.metric("FIP", fip_val)
+                col_f.metric("Bullpen ERA", opp_team_staff.get('era', '0.00'), help="Relief pitchers only. Macro environment for late innings.")
             else:
                 st.info("Advanced stats currently unavailable for this pitcher.")
             st.divider()
 
         st.markdown("### 🏆 Reds Hitting Board (100-Point Scale)")
-        st.caption(f"Graded on Split Advantage (40), Form (40), Pitcher Vulnerability (10), and BvP History (10).")
+        st.caption("Graded on Split Advantage (40), Form (40), Pitcher Vulnerability (10), and BvP History (10).")
+        
+        show_only_starters = st.checkbox("Hide bench players (requires official lineup)", value=False)
 
         if st.button("Run Offensive Engine", type="primary"):
             if not opp_pitcher_id:
@@ -337,6 +363,21 @@ if data['totalGames'] > 0:
                 for i, (name, p_id) in enumerate(hitters.items()):
                     pb.progress((i + 1) / total_hitters, text=f"Analyzing {name}...")
                     
+                    lineup_score = 0
+                    in_lineup = False
+                    
+                    if reds_batting_order:
+                        if p_id in reds_batting_order:
+                            in_lineup = True
+                            idx = reds_batting_order.index(p_id)
+                            if idx <= 2:
+                                lineup_score = 5
+                            elif idx >= 6:
+                                lineup_score = -5
+                        
+                        if show_only_starters and not in_lineup:
+                            continue
+                            
                     hit_games = 0
                     l10_total = 0
                     l10_h_avg = 0.0
@@ -374,7 +415,7 @@ if data['totalGames'] > 0:
                     hrr_score = int(min(20, (l10_hrr_avg / 2.5) * 20))
                     bvp_score = 10 if bvp_avg >= 0.300 else (5 if bvp_avg >= 0.200 else 0)
                     
-                    total_score = split_score + consistency_score + hrr_score + pitcher_score + bvp_score
+                    total_score = split_score + consistency_score + hrr_score + pitcher_score + bvp_score + lineup_score
                     tier = "🟢 Tier 1" if total_score >= 80 else "🟡 Tier 2" if total_score >= 60 else "🔴 Tier 3"
                     
                     scan_results.append({
@@ -514,7 +555,7 @@ if data['totalGames'] > 0:
         st.caption("Tracks real-world Hit and HRR production against the 100-point score. Win = >0 Hits OR >1 HRR.")
         
         if SUPABASE_URL:
-            res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.1", headers=DB_HEADERS)
+            res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
             if res.status_code == 200 and res.json():
                 df_track = pd.DataFrame(res.json())
                 df_active = df_track[df_track['win'] != -1]
