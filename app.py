@@ -569,7 +569,7 @@ if data['totalGames'] > 0:
             else:
                 st.info(f"No historical at-bats for {opponent} vs {pitcher_name}.")
 
-    # TAB 3: SYSTEM TRACKER
+   # TAB 3: SYSTEM TRACKER
     with tab3:
         st.markdown("### 📊 Engine Performance")
         st.caption("Tier 1 & 2 Win = >0 Hits OR >1 HRR. Tier 3 Win = Successfully faded (0 Hits AND <=1 HRR).")
@@ -578,7 +578,12 @@ if data['totalGames'] > 0:
             res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
             if res.status_code == 200 and res.json():
                 df_track = pd.DataFrame(res.json())
-                df_active = df_track[df_track['win'] != -1]
+                
+                # Filter out pending games so only graded games impact the win rate
+                if 'graded' in df_track.columns:
+                    df_active = df_track[df_track['graded'] == 1]
+                else:
+                    df_active = df_track[df_track['win'] != -1]
                 
                 if not df_active.empty:
                     win_rate = (df_active['win'].sum() / len(df_active)) * 100
