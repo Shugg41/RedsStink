@@ -579,9 +579,9 @@ if data['totalGames'] > 0:
             if res.status_code == 200 and res.json():
                 df_track = pd.DataFrame(res.json())
                 
-                # Filter out pending games so only graded games impact the win rate
+                # Filter out pending games AND benched players
                 if 'graded' in df_track.columns:
-                    df_active = df_track[df_track['graded'] == 1]
+                    df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)]
                 else:
                     df_active = df_track[df_track['win'] != -1]
                 
