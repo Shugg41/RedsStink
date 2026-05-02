@@ -61,6 +61,10 @@ def auto_grade_past_predictions():
                         reds_batters = box.get('home', {}).get('batters', [])
                         players_dict = box.get('home', {}).get('players', {})
                     
+                    # Pull the tiers for this date before grading
+                    preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", headers=DB_HEADERS).json()
+                    tier_map = {p['player_id']: p['tier'] for p in preds_res}
+                    
                     requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", 
                                  json={"graded": 1, "win": -1}, headers=DB_HEADERS)
                     
@@ -74,7 +78,13 @@ def auto_grade_past_predictions():
                             runs = stats.get('runs', 0)
                             rbi = stats.get('rbi', 0)
                             hrr = hits + runs + rbi
-                            win = 1 if (hits > 0 or hrr > 1) else 0
+                            
+                            # Tier 3 reversal logic
+                            player_tier = tier_map.get(p_id, "")
+                            if "Tier 3" in player_tier:
+                                win = 1 if (hits == 0 and hrr <= 1) else 0
+                            else:
+                                win = 1 if (hits > 0 or hrr > 1) else 0
                             
                             requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
                                          json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, 
@@ -562,7 +572,7 @@ if data['totalGames'] > 0:
     # TAB 3: SYSTEM TRACKER
     with tab3:
         st.markdown("### 📊 Engine Performance")
-        st.caption("Tracks real-world Hit and HRR production against the 100-point score. Win = >0 Hits OR >1 HRR.")
+        st.caption("Tier 1 & 2 Win = >0 Hits OR >1 HRR. Tier 3 Win = Successfully faded (0 Hits AND <=1 HRR).")
         
         if SUPABASE_URL:
             res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
