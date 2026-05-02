@@ -470,7 +470,8 @@ if data['totalGames'] > 0:
                     
                     for idx, (index, row) in enumerate(df.iterrows()):
                         st.markdown(f"#### {idx + 1}. {row['Player']} - {row['Score']}/100 [{row['Tier']}]")
-                        st.markdown(f"**OPS vs {split_label}:** {row['OPS_Display']} | **L10 HRR/G:** {row['L10_HRR']} | **L10 Hits/G:** {row['L10_Hits']} | **BvP AVG:** {row['BVP_Avg']:.3f}")
+                        st.markdown(f"**OPS vs {split_label}:** {row['OPS_Display']} | **BvP AVG:** {row['BVP_Avg']:.3f}")
+                        st.markdown(f"**L10 HRR/G:** {row['L10_HRR']} | **L10 Hits/G:** {row['L10_Hits']}")
                         st.divider()
 
     # TAB 2: PITCHER STRIKEOUTS
