@@ -470,13 +470,7 @@ if data['totalGames'] > 0:
                     
                     for idx, (index, row) in enumerate(df.iterrows()):
                         st.markdown(f"#### {idx + 1}. {row['Player']} - {row['Score']}/100 [{row['Tier']}]")
-                        
-                        m1, m2, m3, m4 = st.columns(4)
-                        m1.metric(f"OPS vs {split_label}", row['OPS_Display'])
-                        m2.metric("L10 HRR/G", row['L10_HRR'])
-                        m3.metric("L10 Hits/G", row['L10_Hits'])
-                        m4.metric("BvP AVG", f"{row['BVP_Avg']:.3f}")
-                        
+                        st.markdown(f"**OPS vs {split_label}:** {row['OPS_Display']} | **L10 HRR/G:** {row['L10_HRR']} | **L10 Hits/G:** {row['L10_Hits']} | **BvP AVG:** {row['BVP_Avg']:.3f}")
                         st.divider()
 
     # TAB 2: PITCHER STRIKEOUTS
@@ -569,7 +563,7 @@ if data['totalGames'] > 0:
             else:
                 st.info(f"No historical at-bats for {opponent} vs {pitcher_name}.")
 
-   # TAB 3: SYSTEM TRACKER
+    # TAB 3: SYSTEM TRACKER
     with tab3:
         st.markdown("### 📊 Engine Performance")
         st.caption("Tier 1 & 2 Win = >0 Hits OR >1 HRR. Tier 3 Win = Successfully faded (0 Hits AND <=1 HRR).")
