@@ -61,9 +61,9 @@ def auto_grade_past_predictions():
                         reds_batters = box.get('home', {}).get('batters', [])
                         players_dict = box.get('home', {}).get('players', {})
                     
-                    # Pull the tiers for this date before grading
+                    # Pull the tiers for this date before grading and force ID to text
                     preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", headers=DB_HEADERS).json()
-                    tier_map = {p['player_id']: p['tier'] for p in preds_res}
+                    tier_map = {str(p['player_id']): p.get('tier', '') for p in preds_res}
                     
                     requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", 
                                  json={"graded": 1, "win": -1}, headers=DB_HEADERS)
@@ -79,8 +79,8 @@ def auto_grade_past_predictions():
                             rbi = stats.get('rbi', 0)
                             hrr = hits + runs + rbi
                             
-                            # Tier 3 reversal logic
-                            player_tier = tier_map.get(p_id, "")
+                            # Tier 3 reversal logic with string forced ID
+                            player_tier = tier_map.get(str(p_id), "")
                             if "Tier 3" in player_tier:
                                 win = 1 if (hits == 0 and hrr <= 1) else 0
                             else:
