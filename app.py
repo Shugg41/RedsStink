@@ -189,6 +189,19 @@ def get_advanced_pitching(player_id, year):
         return {}
 
 @st.cache_data(ttl=3600)
+def get_advanced_hitting(player_id, year):
+    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=hitting&season={year}"
+    res = requests.get(url).json()
+    stats = {}
+    try:
+        for split in res.get('stats', []):
+            if split['type']['displayName'] in ['season', 'seasonAdvanced']:
+                stats.update(split['splits'][0]['stat'])
+        return stats
+    except:
+        return {}
+
+@st.cache_data(ttl=3600)
 def get_team_pitching(team_id, year):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=pitching&season={year}&sitCodes=rp"
     res = requests.get(url).json()
@@ -324,7 +337,7 @@ if data['totalGames'] > 0:
     except:
         reds_batting_order = []
 
-    tab1, tab2, tab3 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts", "📊 System Tracker"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts", "📊 System Tracker", "🔍 Player Deep Dive"])
 
     # TAB 1: OFFENSE MATCHUPS
     with tab1:
@@ -607,6 +620,82 @@ if data['totalGames'] > 0:
                 st.info("No games have been graded yet. The system grades yesterday's games automatically when you open the app.")
         else:
             st.error("Supabase connection missing. Check Streamlit Secrets.")
+
+    # TAB 4: PLAYER DEEP DIVE
+    with tab4:
+        st.markdown("### 🔍 Batter Deep Dive")
+        
+        reds_hitters_list = sorted(hitters.keys())
+        selected_hitter = st.selectbox("Select Reds Batter", reds_hitters_list)
+        h_id = hitters[selected_hitter]
+        
+        adv_hit = get_advanced_hitting(h_id, current_year)
+        
+        if adv_hit:
+            st.markdown("#### Advanced Metrics")
+            st.caption("OPS+ uses 100 as league average. >100 is great, <100 is struggling.")
+            
+            ops_plus = adv_hit.get('opsPlus', 'N/A')
+            babip = adv_hit.get('babip', '.000')
+            iso = adv_hit.get('iso', '.000')
+            
+            try: k_pct = f"{float(adv_hit.get('strikeoutsPerPlateAppearance', 0))*100:.1f}%"
+            except: k_pct = "N/A"
+            
+            try: bb_pct = f"{float(adv_hit.get('walksPerPlateAppearance', 0))*100:.1f}%"
+            except: bb_pct = "N/A"
+            
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("OPS+", ops_plus)
+            c2.metric("BABIP", babip, help="Batting Avg on Balls in Play. Normal is ~.300. Abnormally high/low means luck is playing a factor.")
+            c3.metric("ISO", iso, help="Isolated Power. >.200 is excellent. Measures raw power output.")
+            c4.metric("K%", k_pct)
+            c5.metric("BB%", bb_pct)
+            
+            st.divider()
+            
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown("#### vs Left-Handed Pitching")
+            vl_stats = get_season_stats(h_id, "hitting", current_year, split="vl")
+            try:
+                vl_stat = vl_stats['stats'][0]['splits'][0]['stat']
+                st.markdown(f"**AVG:** {vl_stat.get('avg', '.000')} | **OPS:** {vl_stat.get('ops', '.000')} | **HR:** {vl_stat.get('homeRuns', 0)}")
+            except:
+                st.info("No stats vs LHP this season.")
+                
+        with col_r:
+            st.markdown("#### vs Right-Handed Pitching")
+            vr_stats = get_season_stats(h_id, "hitting", current_year, split="vr")
+            try:
+                vr_stat = vr_stats['stats'][0]['splits'][0]['stat']
+                st.markdown(f"**AVG:** {vr_stat.get('avg', '.000')} | **OPS:** {vr_stat.get('ops', '.000')} | **HR:** {vr_stat.get('homeRuns', 0)}")
+            except:
+                st.info("No stats vs RHP this season.")
+        
+        st.divider()
+        st.markdown("#### Last 10 Games Form")
+        
+        h_logs = get_game_logs(h_id, current_year, group="hitting")
+        if h_logs:
+            l10_display = []
+            for log in h_logs[-10:]:
+                l_stat = log.get('stat', {})
+                l10_display.append({
+                    "Date": log.get('date', ''),
+                    "Opp": log.get('opponent', {}).get('name', ''),
+                    "AB": l_stat.get('atBats', 0),
+                    "Hits": l_stat.get('hits', 0),
+                    "Runs": l_stat.get('runs', 0),
+                    "RBI": l_stat.get('rbi', 0),
+                    "HR": l_stat.get('homeRuns', 0),
+                    "K": l_stat.get('strikeOuts', 0),
+                    "BB": l_stat.get('baseOnBalls', 0)
+                })
+            df_l10 = pd.DataFrame(l10_display).sort_values(by="Date", ascending=False)
+            st.dataframe(df_l10, hide_index=True, use_container_width=True)
+        else:
+            st.info("No game logs found for this season.")
 
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
