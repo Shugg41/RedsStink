@@ -345,18 +345,21 @@ if data['totalGames'] > 0:
                             l10_h_avg = round(sum(g.get('stat', {}).get('hits', 0) for g in l10)/l10_total, 1)
                             l10_hrr_avg = round(sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10)/l10_total, 1)
                     
-                    split_ops, split_avg = 0.0, ".000"
+                    overall_avg = ".000"
+                    ov_data = get_season_stats(p_id, "hitting", current_year)
+                    try: overall_avg = ov_data['stats'][0]['splits'][0]['stat'].get('avg', '.000')
+                    except: pass
+
+                    split_ops = 0.0
                     sp_data = get_season_stats(p_id, "hitting", current_year, split=split_code)
                     try:
                         stat_block = sp_data['stats'][0]['splits'][0]['stat']
                         split_ops = float(stat_block.get('ops', 0))
-                        split_avg = stat_block.get('avg', ".000")
                     except:
                         c_data = get_career_splits(p_id, "hitting", split_code)
                         try:
                             stat_block = c_data['stats'][0]['splits'][0]['stat']
                             split_ops = float(stat_block.get('ops', 0))
-                            split_avg = stat_block.get('avg', ".000")
                         except: pass
                         
                     bvp_avg, bvp_bonus = 0.0, 0
@@ -373,7 +376,7 @@ if data['totalGames'] > 0:
                     tier = "🟢 Tier 1" if total_score >= 75 else "🟡 Tier 2" if total_score >= 55 else "🔴 Tier 3"
                     
                     scan_results.append({
-                        "Player": name, "Player_ID": p_id, "Tier": tier, "Score": total_score, "Avg": split_avg,
+                        "Player": name, "Player_ID": p_id, "Tier": tier, "Score": total_score, "Avg": overall_avg,
                         "Raw_OPS": split_ops, "L10_HRR": l10_hrr_avg, "L10_Hits": l10_h_avg, "BVP_Avg": bvp_avg,
                         "OPS_Display": f"{split_ops:.3f}"
                     })
