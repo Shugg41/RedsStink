@@ -243,10 +243,15 @@ st.title("🔴 Reds Matchup & Prop Engine")
 data = get_schedule(date_str)
 reds_pitcher_name, reds_pitcher_id, opp_pitcher_name, opp_pitcher_id = "TBD", None, "TBD", None
 opponent, opp_team_id = "Unknown", None
+is_pregame = False
 
 if data['totalGames'] > 0:
     game = data['dates'][0]['games'][0]
     game_pk = game['gamePk']
+    
+    game_status = game['status']['statusCode']
+    is_pregame = game_status in ['S', 'P', 'PW']
+    
     starters = get_game_starters(game_pk)
     away_team, home_team = game['teams']['away']['team']['name'], game['teams']['home']['team']['name']
     
@@ -385,14 +390,17 @@ if data['totalGames'] > 0:
                 if SUPABASE_URL:
                     check_url = f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}&select=date"
                     if not requests.get(check_url, headers=DB_HEADERS).json():
-                        insert_data = []
-                        for r in scan_results:
-                            insert_data.append({
-                                "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
-                                "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
-                                "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0
-                            })
-                        requests.post(f"{SUPABASE_URL}/rest/v1/predictions", json=insert_data, headers=DB_HEADERS)
+                        if is_pregame:
+                            insert_data = []
+                            for r in scan_results:
+                                insert_data.append({
+                                    "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
+                                    "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
+                                    "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0
+                                })
+                            requests.post(f"{SUPABASE_URL}/rest/v1/predictions", json=insert_data, headers=DB_HEADERS)
+                        else:
+                            st.warning("⚠️ Game has already started. Today's predictions will not be saved to protect tracker accuracy.")
                 
                 if scan_results:
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
@@ -458,17 +466,17 @@ if data['totalGames'] > 0:
                     win_rate = (total_wins / len(df_active)) * 100
                     sys_score = df_active['points'].sum()
                     
-                    # L7 Trend
+                    t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
+                    t1_units = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
+                    
                     l7_date = df_active['date_obj'].max() - pd.Timedelta(days=7)
                     df_l7 = df_active[df_active['date_obj'] >= l7_date]
                     l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
                     
-                    # HRR Quality
                     hrr_wins = df_active[(df_active['win'] == 1) & (df_active['actual_hrr'] > 1)]
                     hrr_win_pct = (len(hrr_wins) / total_wins) * 100 if total_wins > 0 else 0.0
                     
-                    # Tier 1 Streak
-                    t1_df = df_active[df_active['tier'].str.contains("Tier 1")].sort_values(by='date', ascending=False)
+                    t1_df = t1_active.sort_values(by='date', ascending=False)
                     streak_str = "None"
                     if not t1_df.empty:
                         current_status = t1_df.iloc[0]['win']
@@ -480,11 +488,12 @@ if data['totalGames'] > 0:
                                 break
                         streak_str = f"W{streak_count}" if current_status == 1 else f"L{streak_count}"
                     
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Overall Win %", f"{win_rate:.1f}%")
-                    c2.metric("System Score", f"{sys_score:g}", help="T1=±3, T2=±2, T3=+1/0. Positive = Profit.")
-                    c3.metric("L7 Days Win %", f"{l7_win_rate:.1f}%")
-                    c4.metric("Tier 1 Streak", streak_str)
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Win %", f"{win_rate:.1f}%")
+                    c2.metric("Sys Score", f"{sys_score:g}", help="T1=±3, T2=±2, T3=+1/0.")
+                    c3.metric("T1 Units", f"{t1_units:+g} U", help="+1 for Win, -1 for Loss on Tier 1s.")
+                    c4.metric("L7 Win %", f"{l7_win_rate:.1f}%")
+                    c5.metric("T1 Streak", streak_str)
                     
                     st.caption(f"🎯 **Win Quality:** {hrr_win_pct:.1f}% of total wins came with >1 HRR.")
                     st.divider()
