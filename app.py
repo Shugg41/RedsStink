@@ -453,13 +453,13 @@ if data['totalGames'] > 0:
                         st.divider()
 
     with tab2:
-        st.markdown("### ⚾ Pitcher Outs Engine")
-        pitcher_target = st.selectbox("Select Starter to Evaluate", [reds_pitcher_name, opp_pitcher_name])
+        st.markdown("### ⚾ Reds Pitcher Outs Engine")
         
-        target_id = reds_pitcher_id if pitcher_target == reds_pitcher_name else opp_pitcher_id
-        target_team_id = 113 if pitcher_target == reds_pitcher_name else opp_team_id
-        facing_team_id = opp_team_id if pitcher_target == reds_pitcher_name else 113
-        facing_team_name = opponent if pitcher_target == reds_pitcher_name else "Reds"
+        target_id = reds_pitcher_id
+        target_team_id = 113
+        facing_team_id = opp_team_id
+        facing_team_name = opponent
+        pitcher_target = reds_pitcher_name
         
         if target_id and target_id != 'TBD':
             p_hand = get_pitcher_hand(target_id)
@@ -525,21 +525,18 @@ if data['totalGames'] > 0:
                     st.divider()
                     st.markdown(f"### 🎯 Final Projected Outs: {final_proj}")
                     
-                    if st.button("Log Pitcher Projection"):
-                        if SUPABASE_URL:
-                            check_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}&player_id=eq.{target_id}"
-                            if not requests.get(check_url, headers=DB_HEADERS).json():
-                                if is_pregame:
-                                    insert_data = {
-                                        "date": date_str, "player_id": target_id, "player_name": pitcher_target,
-                                        "projected_outs": final_proj, "actual_outs": 0, "graded": 0
-                                    }
-                                    requests.post(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", json=insert_data, headers=DB_HEADERS)
-                                    st.success(f"Projection for {pitcher_target} saved to tracker.")
-                                else:
-                                    st.warning("Game has started. Projection not saved.")
+                    if SUPABASE_URL:
+                        check_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}&player_id=eq.{target_id}"
+                        if not requests.get(check_url, headers=DB_HEADERS).json():
+                            if is_pregame:
+                                insert_data = {
+                                    "date": date_str, "player_id": target_id, "player_name": pitcher_target,
+                                    "projected_outs": final_proj, "actual_outs": 0, "graded": 0
+                                }
+                                requests.post(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", json=insert_data, headers=DB_HEADERS)
+                                st.success(f"✅ Projection for {pitcher_target} auto-saved to tracker.")
                             else:
-                                st.info("Projection already logged for today.")
+                                st.warning("⚠️ Game has started. Projections are locked and will not be saved to tracker.")
                 
                 with c2:
                     st.markdown("#### 📋 Last 5 Starts Log")
