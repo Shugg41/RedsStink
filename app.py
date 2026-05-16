@@ -159,6 +159,10 @@ def get_league_hitting(year):
 
 def calculate_ops_plus(player_stats, league_stats):
     try:
+        pa = int(player_stats.get('plateAppearances', 0))
+        if pa == 0:
+            return "N/A"
+            
         p_obp = float(player_stats.get('obp', '.000'))
         p_slg = float(player_stats.get('slg', '.000'))
         lg_obp = float(league_stats.get('obp', '.315'))
@@ -167,7 +171,11 @@ def calculate_ops_plus(player_stats, league_stats):
         if lg_obp <= 0 or lg_slg <= 0: return "N/A"
 
         ops_plus = 100 * ((p_obp / lg_obp) + (p_slg / lg_slg) - 1)
-        return str(int(round(ops_plus)))
+        
+        # Floor at 0 to avoid confusing negative numbers for struggling hitters
+        ops_plus = max(0, int(round(ops_plus)))
+        
+        return str(ops_plus)
     except:
         return "N/A"
 
