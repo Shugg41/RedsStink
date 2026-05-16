@@ -624,6 +624,15 @@ if data['totalGames'] > 0:
                         c4.metric("L7 Win %", f"{l7_win_rate:.1f}%")
                         st.divider()
                         
+                        st.markdown("#### Performance by Tier")
+                        tier_grp = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
+                        cols = st.columns(len(tier_grp))
+                        for i, r in tier_grp.iterrows():
+                            cols[i].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
+                        
+                        st.divider()
+                        
+                        st.markdown("#### Recent Graded Logs")
                         df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']].sort_values(by='date', ascending=False)
                         df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
                         st.dataframe(df_display.drop(columns=['win']), hide_index=True, use_container_width=True)
