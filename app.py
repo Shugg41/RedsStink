@@ -34,12 +34,21 @@ def auto_grade_past_predictions():
     if not SUPABASE_URL: return
     today_str = datetime.now().strftime("%Y-%m-%d")
     
+    # Grade Hitters
     url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&date=lt.{today_str}&select=date"
     res = requests.get(url, headers=DB_HEADERS)
     
-    if res.status_code != 200 or not res.json(): return
-    
-    dates_to_grade = list(set([row['date'] for row in res.json()]))
+    dates_to_grade = []
+    if res.status_code == 200 and res.json():
+        dates_to_grade.extend([row['date'] for row in res.json()])
+        
+    # Grade Pitchers
+    p_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.0&date=lt.{today_str}&select=date"
+    p_res = requests.get(p_url, headers=DB_HEADERS)
+    if p_res.status_code == 200 and p_res.json():
+        dates_to_grade.extend([row['date'] for row in p_res.json()])
+
+    dates_to_grade = list(set(dates_to_grade))
 
     for d in dates_to_grade:
         sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}"
@@ -55,39 +64,57 @@ def auto_grade_past_predictions():
                     feed = requests.get(feed_url).json()
                     box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
                     
+                    players_dict = {**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})}
+                    
                     if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
                         reds_batters = box.get('away', {}).get('batters', [])
-                        players_dict = box.get('away', {}).get('players', {})
                     else:
                         reds_batters = box.get('home', {}).get('batters', [])
-                        players_dict = box.get('home', {}).get('players', {})
                     
-                    preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", headers=DB_HEADERS).json()
-                    tier_map = {str(p['player_id']): p.get('tier', '') for p in preds_res}
-                    
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", 
-                                 json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-                    
-                    for p_id in reds_batters:
-                        p_key = f"ID{p_id}"
-                        stats = players_dict.get(p_key, {}).get('stats', {}).get('batting', {})
-                        pa = stats.get('plateAppearances', 0)
+                    # Process Hitters
+                    preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS).json()
+                    if preds_res:
+                        tier_map = {str(p['player_id']): p.get('tier', '') for p in preds_res}
+                        requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
                         
-                        if pa > 0:
-                            hits = stats.get('hits', 0)
-                            runs = stats.get('runs', 0)
-                            rbi = stats.get('rbi', 0)
-                            hrr = hits + runs + rbi
+                        for p_id in reds_batters:
+                            p_key = f"ID{p_id}"
+                            stats = players_dict.get(p_key, {}).get('stats', {}).get('batting', {})
+                            pa = stats.get('plateAppearances', 0)
                             
-                            player_tier = tier_map.get(str(p_id), "")
-                            if "Tier 3" in player_tier:
-                                win = 1 if (hits == 0 and hrr <= 1) else 0
+                            if pa > 0:
+                                hits = stats.get('hits', 0)
+                                runs = stats.get('runs', 0)
+                                rbi = stats.get('rbi', 0)
+                                hrr = hits + runs + rbi
+                                
+                                player_tier = tier_map.get(str(p_id), "")
+                                if "Tier 3" in player_tier:
+                                    win = 1 if (hits == 0 and hrr <= 1) else 0
+                                else:
+                                    win = 1 if (hits > 0 or hrr > 1) else 0
+                                
+                                requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
+                                             json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, 
+                                             headers=DB_HEADERS)
+                                             
+                    # Process Pitchers
+                    p_preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS).json()
+                    if p_preds_res:
+                        for p_pred in p_preds_res:
+                            p_id = p_pred['player_id']
+                            p_key = f"ID{p_id}"
+                            if p_key in players_dict:
+                                stats = players_dict.get(p_key, {}).get('stats', {}).get('pitching', {})
+                                ip_str = stats.get('inningsPitched', '0.0')
+                                actual_outs = int(round(calc_ip(ip_str) * 3))
+                                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
+                                             json={"actual_outs": actual_outs, "graded": 1}, 
+                                             headers=DB_HEADERS)
                             else:
-                                win = 1 if (hits > 0 or hrr > 1) else 0
-                            
-                            requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
-                                         json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, 
-                                         headers=DB_HEADERS)
+                                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
+                                             json={"actual_outs": 0, "graded": 1}, 
+                                             headers=DB_HEADERS)
         except:
             pass
 
@@ -497,6 +524,22 @@ if data['totalGames'] > 0:
                     st.markdown(f"**Park Factor ({park_name}):** {park_adj:+.1f}")
                     st.divider()
                     st.markdown(f"### 🎯 Final Projected Outs: {final_proj}")
+                    
+                    if st.button("Log Pitcher Projection"):
+                        if SUPABASE_URL:
+                            check_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}&player_id=eq.{target_id}"
+                            if not requests.get(check_url, headers=DB_HEADERS).json():
+                                if is_pregame:
+                                    insert_data = {
+                                        "date": date_str, "player_id": target_id, "player_name": pitcher_target,
+                                        "projected_outs": final_proj, "actual_outs": 0, "graded": 0
+                                    }
+                                    requests.post(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", json=insert_data, headers=DB_HEADERS)
+                                    st.success(f"Projection for {pitcher_target} saved to tracker.")
+                                else:
+                                    st.warning("Game has started. Projection not saved.")
+                            else:
+                                st.info("Projection already logged for today.")
                 
                 with c2:
                     st.markdown("#### 📋 Last 5 Starts Log")
@@ -518,70 +561,67 @@ if data['totalGames'] > 0:
 
     with tab3:
         st.markdown("### 📊 Engine Performance")
+        
+        hit_tab, pitch_tab = st.tabs(["🏏 Hitting Tracker", "⚾ Pitching Tracker"])
+        
         if SUPABASE_URL:
-            res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
-            if res.status_code == 200 and res.json():
-                df_track = pd.DataFrame(res.json())
-                df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)].copy()
-                
-                if not df_active.empty:
-                    df_active['date_obj'] = pd.to_datetime(df_active['date'])
+            with hit_tab:
+                res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
+                if res.status_code == 200 and res.json():
+                    df_track = pd.DataFrame(res.json())
+                    df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)].copy()
                     
-                    def calc_points(row):
-                        if row['win'] == 1:
-                            return 3 if "Tier 1" in row['tier'] else (2 if "Tier 2" in row['tier'] else 1)
-                        else:
-                            return -3 if "Tier 1" in row['tier'] else (-2 if "Tier 2" in row['tier'] else 0)
-                    
-                    df_active['points'] = df_active.apply(calc_points, axis=1)
-                    
-                    total_wins = df_active['win'].sum()
-                    win_rate = (total_wins / len(df_active)) * 100
-                    sys_score = df_active['points'].sum()
-                    
-                    t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
-                    t1_units = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
-                    
-                    l7_date = df_active['date_obj'].max() - pd.Timedelta(days=7)
-                    df_l7 = df_active[df_active['date_obj'] >= l7_date]
-                    l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
-                    
-                    hrr_wins = df_active[(df_active['win'] == 1) & (df_active['actual_hrr'] > 1)]
-                    hrr_win_pct = (len(hrr_wins) / total_wins) * 100 if total_wins > 0 else 0.0
-                    
-                    t1_df = t1_active.sort_values(by='date', ascending=False)
-                    streak_str = "None"
-                    if not t1_df.empty:
-                        current_status = t1_df.iloc[0]['win']
-                        streak_count = 0
-                        for val in t1_df['win']:
-                            if val == current_status:
-                                streak_count += 1
+                    if not df_active.empty:
+                        df_active['date_obj'] = pd.to_datetime(df_active['date'])
+                        
+                        def calc_points(row):
+                            if row['win'] == 1:
+                                return 3 if "Tier 1" in row['tier'] else (2 if "Tier 2" in row['tier'] else 1)
                             else:
-                                break
-                        streak_str = f"W{streak_count}" if current_status == 1 else f"L{streak_count}"
+                                return -3 if "Tier 1" in row['tier'] else (-2 if "Tier 2" in row['tier'] else 0)
+                        
+                        df_active['points'] = df_active.apply(calc_points, axis=1)
+                        total_wins = df_active['win'].sum()
+                        win_rate = (total_wins / len(df_active)) * 100
+                        sys_score = df_active['points'].sum()
+                        
+                        t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
+                        t1_units = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
+                        
+                        l7_date = df_active['date_obj'].max() - pd.Timedelta(days=7)
+                        df_l7 = df_active[df_active['date_obj'] >= l7_date]
+                        l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
+                        
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Win %", f"{win_rate:.1f}%")
+                        c2.metric("Sys Score", f"{sys_score:g}")
+                        c3.metric("T1 Units", f"{t1_units:+g} U")
+                        c4.metric("L7 Win %", f"{l7_win_rate:.1f}%")
+                        st.divider()
+                        
+                        df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']].sort_values(by='date', ascending=False)
+                        df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
+                        st.dataframe(df_display.drop(columns=['win']), hide_index=True, use_container_width=True)
+
+            with pitch_tab:
+                p_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
+                if p_res.status_code == 200 and p_res.json():
+                    df_ptrack = pd.DataFrame(p_res.json())
+                    df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy()
                     
-                    c1, c2, c3, c4, c5 = st.columns(5)
-                    c1.metric("Win %", f"{win_rate:.1f}%")
-                    c2.metric("Sys Score", f"{sys_score:g}", help="T1=±3, T2=±2, T3=+1/0.")
-                    c3.metric("T1 Units", f"{t1_units:+g} U", help="+1 for Win, -1 for Loss on Tier 1s.")
-                    c4.metric("L7 Win %", f"{l7_win_rate:.1f}%")
-                    c5.metric("T1 Streak", streak_str)
-                    
-                    st.caption(f"🎯 **Win Quality:** {hrr_win_pct:.1f}% of total wins came with >1 HRR.")
-                    st.divider()
-                    
-                    st.markdown("#### Performance by Tier")
-                    tier_grp = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
-                    cols = st.columns(len(tier_grp))
-                    for i, r in tier_grp.iterrows():
-                        cols[i].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
-                    
-                    st.divider()
-                    st.markdown("#### Recent Graded Logs")
-                    df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'actual_hrr', 'win']].sort_values(by='date', ascending=False)
-                    df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
-                    st.dataframe(df_display.drop(columns=['win']), hide_index=True, use_container_width=True)
+                    if not df_pactive.empty:
+                        df_pactive['delta'] = df_pactive['actual_outs'] - df_pactive['projected_outs']
+                        df_pactive['abs_miss'] = df_pactive['delta'].abs()
+                        avg_miss = df_pactive['abs_miss'].mean()
+                        
+                        st.metric("Average Miss", f"{avg_miss:.1f} Outs", help="How many outs the engine misses by on average. Closer to 0 is better.")
+                        st.divider()
+                        
+                        df_pdisplay = df_pactive[['date', 'player_name', 'projected_outs', 'actual_outs', 'delta']].sort_values(by='date', ascending=False)
+                        df_pdisplay['delta'] = df_pdisplay['delta'].apply(lambda x: f"{x:+.1f}")
+                        st.dataframe(df_pdisplay, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No graded pitching predictions yet.")
 
     with tab4:
         st.markdown("### 🔍 Batter Deep Dive")
