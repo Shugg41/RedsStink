@@ -148,6 +148,29 @@ def calculate_fip(stats):
     except:
         return "0.00"
 
+@st.cache_data(ttl=86400)
+def get_league_hitting(year):
+    url = f"https://statsapi.mlb.com/api/v1/sports/1/stats?stats=season&group=hitting&season={year}"
+    try:
+        res = requests.get(url).json()
+        return res['stats'][0]['splits'][0]['stat']
+    except:
+        return {'obp': '.315', 'slg': '.400'}
+
+def calculate_ops_plus(player_stats, league_stats):
+    try:
+        p_obp = float(player_stats.get('obp', '.000'))
+        p_slg = float(player_stats.get('slg', '.000'))
+        lg_obp = float(league_stats.get('obp', '.315'))
+        lg_slg = float(league_stats.get('slg', '.400'))
+
+        if lg_obp <= 0 or lg_slg <= 0: return "N/A"
+
+        ops_plus = 100 * ((p_obp / lg_obp) + (p_slg / lg_slg) - 1)
+        return str(int(round(ops_plus)))
+    except:
+        return "N/A"
+
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
@@ -359,7 +382,7 @@ if data['totalGames'] > 0:
             st.divider()
 
         st.markdown("### 🏆 Reds Hitting Board (100-Point Scale)")
-        st.caption("Graded on Split (45), Form (45), Pitcher (10). BvP is a max +10 bonus.")
+        st.caption("Graded on Split (45), Form (45), Pitcher (10). BvP is a max +10 bonus. OPS+ is informational only.")
         
         lineup_ready = len(reds_batting_order) > 0
         if lineup_ready: st.success("✅ Official Lineup Confirmed")
@@ -372,6 +395,7 @@ if data['totalGames'] > 0:
             else:
                 pb = st.progress(0, text="Evaluating roster...")
                 scan_results = []
+                league_stats = get_league_hitting(current_year)
                 for i, (name, p_id) in enumerate(hitters.items()):
                     pb.progress((i+1)/len(hitters), text=f"Analyzing {name}...")
                     lineup_score, in_lineup = 0, False
@@ -393,8 +417,12 @@ if data['totalGames'] > 0:
                             l10_hrr_avg = round(sum((g.get('stat', {}).get('hits', 0) + g.get('stat', {}).get('runs', 0) + g.get('stat', {}).get('rbi', 0)) for g in l10)/l10_total, 1)
                     
                     overall_avg = ".000"
+                    ops_plus = "N/A"
                     ov_data = get_season_stats(p_id, "hitting", current_year)
-                    try: overall_avg = ov_data['stats'][0]['splits'][0]['stat'].get('avg', '.000')
+                    try:
+                        player_stat_block = ov_data['stats'][0]['splits'][0]['stat']
+                        overall_avg = player_stat_block.get('avg', '.000')
+                        ops_plus = calculate_ops_plus(player_stat_block, league_stats)
                     except: pass
 
                     split_ops = 0.0
@@ -425,7 +453,7 @@ if data['totalGames'] > 0:
                     scan_results.append({
                         "Player": name, "Player_ID": p_id, "Tier": tier, "Score": total_score, "Avg": overall_avg,
                         "Raw_OPS": split_ops, "L10_HRR": l10_hrr_avg, "L10_Hits": l10_h_avg, "BVP_Avg": bvp_avg,
-                        "OPS_Display": f"{split_ops:.3f}"
+                        "OPS_Display": f"{split_ops:.3f}", "OPS_Plus": ops_plus
                     })
                 pb.empty()
                 
@@ -448,7 +476,7 @@ if data['totalGames'] > 0:
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
                     for idx, (index, row) in enumerate(df.iterrows()):
                         st.markdown(f"#### {idx + 1}. {row['Player']} - {row['Score']}/100 [{row['Tier']}]")
-                        st.markdown(f"**AVG:** {row['Avg']} | **OPS vs {split_label}:** {row['OPS_Display']} | **BvP AVG:** {row['BVP_Avg']:.3f}")
+                        st.markdown(f"**OPS+:** {row['OPS_Plus']} | **AVG:** {row['Avg']} | **OPS vs {split_label}:** {row['OPS_Display']} | **BvP AVG:** {row['BVP_Avg']:.3f}")
                         st.markdown(f"**L10 HRR/G:** {row['L10_HRR']} | **L10 Hits/G:** {row['L10_Hits']}")
                         st.divider()
 
@@ -626,9 +654,18 @@ if data['totalGames'] > 0:
         sel_hitter = st.selectbox("Select Reds Batter", red_hitters)
         h_id = hitters[sel_hitter]
         adv_hit = get_advanced_hitting(h_id, current_year)
+        ov_hit = get_season_stats(h_id, "hitting", current_year)
+        league_stats = get_league_hitting(current_year)
+
+        ops_plus = "N/A"
+        try:
+            p_stat = ov_hit['stats'][0]['splits'][0]['stat']
+            ops_plus = calculate_ops_plus(p_stat, league_stats)
+        except: pass
+
         if adv_hit:
             st.markdown("#### Advanced Metrics")
-            ops_plus, babip, iso = adv_hit.get('opsPlus', 'N/A'), adv_hit.get('babip', '.000'), adv_hit.get('iso', '.000')
+            babip, iso = adv_hit.get('babip', '.000'), adv_hit.get('iso', '.000')
             try: k_pct = f"{float(adv_hit.get('strikeoutsPerPlateAppearance', 0))*100:.1f}%"
             except: k_pct = "N/A"
             try: bb_pct = f"{float(adv_hit.get('walksPerPlateAppearance', 0))*100:.1f}%"
