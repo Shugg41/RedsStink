@@ -1,7 +1,9 @@
+```python
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+import statistics
+from datetime import datetime, timedelta
 
 # PAGE CONFIG
 st.set_page_config(page_title="Reds Prop Dashboard", page_icon="🔴", layout="wide")
@@ -196,6 +198,19 @@ def get_team_pitching(team_id, year):
     try: return res['stats'][0]['splits'][0]['stat']
     except: return {}
 
+@st.cache_data(ttl=3600)
+def get_bullpen_fatigue(team_id):
+    today = datetime.now()
+    start_date = (today - timedelta(days=3)).strftime("%Y-%m-%d")
+    end_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=byDateRange&group=pitching&startDate={start_date}&endDate={end_date}&sitCodes=rp"
+    try:
+        res = requests.get(url).json()
+        ip_str = res['stats'][0]['splits'][0]['stat'].get('inningsPitched', '0.0')
+        return calc_ip(ip_str)
+    except:
+        return 0.0
+
 @st.cache_data(ttl=86400)
 def get_career_splits(player_id, group, split_code):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCodes={split_code}"
@@ -242,12 +257,13 @@ st.title("🔴 Reds Matchup & Prop Engine")
 
 data = get_schedule(date_str)
 reds_pitcher_name, reds_pitcher_id, opp_pitcher_name, opp_pitcher_id = "TBD", None, "TBD", None
-opponent, opp_team_id = "Unknown", None
+opponent, opp_team_id, park_name = "Unknown", None, "Unknown"
 is_pregame = False
 
 if data['totalGames'] > 0:
     game = data['dates'][0]['games'][0]
     game_pk = game['gamePk']
+    park_name = game.get('venue', {}).get('name', 'Unknown')
     
     game_status = game['status']['statusCode']
     is_pregame = game_status in ['S', 'P', 'PW']
@@ -264,7 +280,7 @@ if data['totalGames'] > 0:
         opp_pitcher_name, opp_pitcher_id = starters['away']['name'], starters['away']['id']
         reds_pitcher_name, reds_pitcher_id = starters['home']['name'], starters['home']['id']
 
-    st.subheader(f"🏟️ Matchup: Reds vs {opponent}")
+    st.subheader(f"🏟️ Matchup: Reds vs {opponent} | Venue: {park_name}")
     
     if opp_pitcher_name == 'TBD':
         st.warning("Official lineup card not submitted. Select the starter manually.", icon="⚠️")
@@ -294,7 +310,7 @@ if data['totalGames'] > 0:
         else: reds_batting_order = boxscore.get('home', {}).get('battingOrder', [])
     except: reds_batting_order = []
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Strikeouts", "📊 System Tracker", "🔍 Player Deep Dive"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Outs Engine", "📊 System Tracker", "🔍 Player Deep Dive"])
 
     with tab1:
         adv_stats, pitcher_score = {}, 0
@@ -411,37 +427,95 @@ if data['totalGames'] > 0:
                         st.divider()
 
     with tab2:
-        col1, col2 = st.columns([1, 2])
-        r_pitchers = sorted(pitchers.keys())
-        def_idx = r_pitchers.index(reds_pitcher_name) if reds_pitcher_name in r_pitchers else 0
-        with col1:
-            p_name = st.selectbox("Select Reds Pitcher", r_pitchers, index=def_idx)
-            p_id = pitchers[p_name]
+        st.markdown("### ⚾ Pitcher Outs Engine")
+        pitcher_target = st.selectbox("Select Starter to Evaluate", [reds_pitcher_name, opp_pitcher_name])
         
-        r_hand = get_pitcher_hand(p_id)
-        r_split_code, r_split_label = ("vl", "LHP") if r_hand == "L" else ("vr", "RHP")
-        st.markdown(f"### 🎯 Pitcher Form (Last 5 Starts)")
-        p_logs = get_game_logs(p_id, current_year, group="pitching")
-        avg_k = 0.0
-        if p_logs:
-            l5 = p_logs[-5:]
-            total_k = sum(g.get('stat', {}).get('strikeOuts', 0) for g in l5)
-            total_ip = sum(calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) for g in l5)
-            starts = len(l5)
-            avg_k, avg_ip = round(total_k/starts, 1), round(total_ip/starts, 1)
-            p1, p2, p3 = st.columns(3)
-            p1.metric("Avg Strikeouts", avg_k); p2.metric("Avg IP", avg_ip)
+        target_id = reds_pitcher_id if pitcher_target == reds_pitcher_name else opp_pitcher_id
+        target_team_id = 113 if pitcher_target == reds_pitcher_name else opp_team_id
+        facing_team_id = opp_team_id if pitcher_target == reds_pitcher_name else 113
+        facing_team_name = opponent if pitcher_target == reds_pitcher_name else "Reds"
         
-        st.divider()
-        st.markdown(f"### ⚠️ Opponent Target: {opponent} vs {r_split_label}")
-        opp_stats = get_team_splits(opp_team_id, current_year, r_split_code)
-        if opp_stats:
-            pa, so = opp_stats.get('plateAppearances', 0), opp_stats.get('strikeOuts', 0)
-            if pa > 0:
-                k_rate = round((so/pa)*100, 1)
-                proj_k = round(avg_k * (k_rate/22.0), 1)
-                m1, m2 = st.columns(2)
-                m1.metric("Team K Rate", f"{k_rate}%"); m2.metric("Projected K", proj_k)
+        if target_id and target_id != 'TBD':
+            p_hand = get_pitcher_hand(target_id)
+            p_split_code, p_split_label = ("vl", "LHP") if p_hand == "L" else ("vr", "RHP")
+            
+            p_logs = get_game_logs(target_id, current_year, group="pitching")
+            if p_logs:
+                l5 = p_logs[-5:]
+                pitch_counts = [g.get('stat', {}).get('numberOfPitches', 0) for g in l5]
+                outs_recorded = [int(round(calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) * 3)) for g in l5]
+                
+                if len(l5) >= 3:
+                    median_pitches = statistics.median(pitch_counts)
+                    median_outs = statistics.median(outs_recorded)
+                    stdev_pitches = statistics.stdev(pitch_counts) if len(pitch_counts) > 1 else 0
+                    
+                    if stdev_pitches > 15: conf_level, conf_color = "LOW (High Variance)", "red"
+                    elif stdev_pitches < 8: conf_level, conf_color = "HIGH (Consistent)", "green"
+                    else: conf_level, conf_color = "MEDIUM", "orange"
+                else:
+                    median_pitches = sum(pitch_counts) / len(pitch_counts) if pitch_counts else 0
+                    median_outs = sum(outs_recorded) / len(outs_recorded) if outs_recorded else 0
+                    conf_level, conf_color = "LOW (Insufficient Data)", "red"
+                
+                st.markdown(f"**Engine Confidence:** :{conf_color}[{conf_level}]")
+                st.divider()
+                
+                adv_pitch = get_advanced_pitching(target_id, current_year)
+                whip = float(adv_pitch.get('whip', '1.30'))
+                whip_adj = -1.0 if whip > 1.45 else (-0.5 if whip > 1.30 else (0.5 if whip < 1.10 else 0.0))
+                
+                team_splits = get_team_splits(facing_team_id, current_year, p_split_code)
+                opp_ops = float(team_splits.get('ops', '.730'))
+                ops_adj = -1.0 if opp_ops > .800 else (-0.5 if opp_ops > .750 else (0.5 if opp_ops < .650 else 0.0))
+                
+                opp_ppa = float(team_splits.get('pitchesPerPlateAppearance', '3.85'))
+                ppa_adj = -0.5 if opp_ppa > 4.0 else (0.5 if opp_ppa < 3.75 else 0.0)
+                
+                pa = int(team_splits.get('plateAppearances', 0))
+                so = int(team_splits.get('strikeOuts', 0))
+                opp_k_pct = (so / pa) if pa > 0 else 0.22
+                k_adj = 1.0 if opp_k_pct > 0.28 else (0.5 if opp_k_pct > 0.25 else (-0.5 if opp_k_pct < 0.20 else 0.0))
+                
+                rp_ip = get_bullpen_fatigue(target_team_id)
+                bp_adj = 1.0 if rp_ip >= 14 else (0.5 if rp_ip >= 11 else 0.0)
+                
+                hitter_parks = ['Great American Ball Park', 'Coors Field', 'Fenway Park']
+                pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park']
+                park_adj = -0.5 if park_name in hitter_parks else (0.5 if park_name in pitcher_parks else 0.0)
+                
+                final_proj = round(median_outs + whip_adj + ops_adj + ppa_adj + k_adj + bp_adj + park_adj, 1)
+                
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    st.markdown("#### 🧾 Engine Receipt")
+                    st.markdown(f"**Base Projection (Median Outs):** {median_outs:.1f}")
+                    st.markdown(f"**WHIP Modifier ({whip}):** {whip_adj:+.1f}")
+                    st.markdown(f"**{facing_team_name} OPS vs {p_split_label} ({opp_ops:.3f}):** {ops_adj:+.1f}")
+                    st.markdown(f"**{facing_team_name} K% vs {p_split_label} ({opp_k_pct*100:.1f}%):** {k_adj:+.1f}")
+                    st.markdown(f"**{facing_team_name} P/PA ({opp_ppa}):** {ppa_adj:+.1f}")
+                    st.markdown(f"**Bullpen Fatigue ({rp_ip:.1f} IP L3 Days):** {bp_adj:+.1f}")
+                    st.markdown(f"**Park Factor ({park_name}):** {park_adj:+.1f}")
+                    st.divider()
+                    st.markdown(f"### 🎯 Final Projected Outs: {final_proj}")
+                
+                with c2:
+                    st.markdown("#### 📋 Last 5 Starts Log")
+                    log_data = []
+                    for g in reversed(l5):
+                        s = g.get('stat', {})
+                        o = int(round(calc_ip(s.get('inningsPitched', '0.0')) * 3))
+                        log_data.append({
+                            "Date": g.get('date', ''),
+                            "Opp": g.get('opponent', {}).get('name', ''),
+                            "Pitches": s.get('numberOfPitches', 0),
+                            "Outs": o
+                        })
+                    st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
+            else:
+                st.info("Insufficient start data available for this pitcher.")
+        else:
+            st.warning("Please verify the starting pitcher is selected.")
 
     with tab3:
         st.markdown("### 📊 Engine Performance")
@@ -554,3 +628,6 @@ if data['totalGames'] > 0:
             st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False), hide_index=True, use_container_width=True)
 
 else: st.warning("🌴 **OFF DAY:** The Reds are resting today.")
+
+
+```
