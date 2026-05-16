@@ -359,7 +359,7 @@ if data['totalGames'] > 0:
         else: reds_batting_order = boxscore.get('home', {}).get('battingOrder', [])
     except: reds_batting_order = []
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🏏 Offense Top Matchups", "⚾ Pitcher Outs Engine", "📊 System Tracker", "🔍 Player Deep Dive"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🔥 Offense Top Matchups", "⚾ Pitcher Outs Engine", "📊 System Tracker", "🔍 Player Deep Dive"])
 
     with tab1:
         adv_stats, pitcher_score = {}, 0
