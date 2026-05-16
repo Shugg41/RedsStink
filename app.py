@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -628,6 +627,3 @@ if data['totalGames'] > 0:
             st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False), hide_index=True, use_container_width=True)
 
 else: st.warning("🌴 **OFF DAY:** The Reds are resting today.")
-
-
-```
