@@ -539,6 +539,12 @@ if data['totalGames'] > 0:
                 whip = float(adv_pitch.get('whip', '1.30'))
                 whip_adj = -1.0 if whip > 1.45 else (-0.5 if whip > 1.30 else (0.5 if whip < 1.10 else 0.0))
                 
+                era_val = float(adv_pitch.get('era', '4.00'))
+                try: fip_val = float(calculate_fip(adv_pitch))
+                except: fip_val = 4.00
+                fip_diff = fip_val - era_val
+                fip_adj = -0.5 if fip_diff >= 0.50 else (0.5 if fip_diff <= -0.50 else 0.0)
+                
                 team_splits = get_team_splits(facing_team_id, current_year, p_split_code)
                 opp_ops = float(team_splits.get('ops', '.730'))
                 ops_adj = -1.0 if opp_ops > .800 else (-0.5 if opp_ops > .750 else (0.5 if opp_ops < .650 else 0.0))
@@ -558,13 +564,14 @@ if data['totalGames'] > 0:
                 pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park']
                 park_adj = -0.5 if park_name in hitter_parks else (0.5 if park_name in pitcher_parks else 0.0)
                 
-                final_proj = round(median_outs + whip_adj + ops_adj + ppa_adj + k_adj + bp_adj + park_adj, 1)
+                final_proj = round(median_outs + whip_adj + fip_adj + ops_adj + ppa_adj + k_adj + bp_adj + park_adj, 1)
                 
                 c1, c2 = st.columns([1, 1])
                 with c1:
-                    st.markdown("#### 🧾 Engine Receipt")
+                    st.markdown(f"#### 🧾 Engine Receipt: {pitcher_target}")
                     st.markdown(f"**Base Projection (Median Outs):** {median_outs:.1f}")
                     st.markdown(f"**WHIP Modifier ({whip}):** {whip_adj:+.1f}")
+                    st.markdown(f"**FIP Regression (FIP {fip_val:.2f} vs ERA {era_val:.2f}):** {fip_adj:+.1f}")
                     st.markdown(f"**{facing_team_name} OPS vs {p_split_label} ({opp_ops:.3f}):** {ops_adj:+.1f}")
                     st.markdown(f"**{facing_team_name} K% vs {p_split_label} ({opp_k_pct*100:.1f}%):** {k_adj:+.1f}")
                     st.markdown(f"**{facing_team_name} P/PA ({opp_ppa}):** {ppa_adj:+.1f}")
@@ -607,7 +614,7 @@ if data['totalGames'] > 0:
     with tab3:
         st.markdown("### 📊 Engine Performance")
         
-        hit_tab, pitch_tab = st.tabs(["🏏 Hitting Tracker", "⚾ Pitching Tracker"])
+        hit_tab, pitch_tab = st.tabs(["🔥 Hitting Tracker", "⚾ Pitching Tracker"])
         
         if SUPABASE_URL:
             with hit_tab:
