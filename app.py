@@ -644,20 +644,22 @@ if data['totalGames'] > 0:
                         df_l7 = df_active[df_active['date_obj'] >= l7_date]
                         l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
                         
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Win %", f"{win_rate:.1f}%")
-                        c2.metric("Sys Score", f"{sys_score:g}")
-                        c3.metric("T1 Units", f"{t1_units:+g} U")
-                        c4.metric("L7 Win %", f"{l7_win_rate:.1f}%")
-                        st.divider()
-                        
-                        st.markdown("#### Performance by Tier")
+                        st.markdown("#### 🎯 Tier Performance & Units")
                         tier_grp = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
-                        cols = st.columns(len(tier_grp))
+                        
+                        top_cols = st.columns(len(tier_grp) + 1)
+                        top_cols[0].metric("🥇 T1 Units", f"{t1_units:+g} U")
+                        
                         for i, r in tier_grp.iterrows():
-                            cols[i].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
+                            top_cols[i+1].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
                         
                         st.divider()
+                        
+                        with st.expander("📊 View Overall System Metrics"):
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Overall Win %", f"{win_rate:.1f}%")
+                            c2.metric("L7 Win %", f"{l7_win_rate:.1f}%")
+                            c3.metric("System Score", f"{sys_score:g}")
                         
                         st.markdown("#### Recent Graded Logs")
                         df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']].sort_values(by='date', ascending=False)
