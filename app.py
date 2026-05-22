@@ -32,18 +32,17 @@ except:
 # LAZY AUTOMATION
 def auto_grade_past_predictions():
     if not SUPABASE_URL: return
-    today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Grade Hitters
-    url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&date=lt.{today_str}&select=date"
+    # Grade Hitters (Ignore date, just look for ungraded)
+    url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&select=date"
     res = requests.get(url, headers=DB_HEADERS)
     
     dates_to_grade = []
     if res.status_code == 200 and res.json():
         dates_to_grade.extend([row['date'] for row in res.json()])
         
-    # Grade Pitchers
-    p_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.0&date=lt.{today_str}&select=date"
+    # Grade Pitchers (Ignore date, just look for ungraded)
+    p_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.0&select=date"
     p_res = requests.get(p_url, headers=DB_HEADERS)
     if p_res.status_code == 200 and p_res.json():
         dates_to_grade.extend([row['date'] for row in p_res.json()])
@@ -58,6 +57,7 @@ def auto_grade_past_predictions():
                 game = sched['dates'][0]['games'][0]
                 status = game['status']['statusCode']
                 
+                # If game is final, grade it immediately
                 if status in ['F', 'O', 'CR']:
                     game_pk = game['gamePk']
                     feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
@@ -317,6 +317,10 @@ reds_pitcher_name, reds_pitcher_id, opp_pitcher_name, opp_pitcher_id = "TBD", No
 opponent, opp_team_id, park_name = "Unknown", None, "Unknown"
 is_pregame = False
 
+roster_res = get_roster(113)
+hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
+pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
+
 if data['totalGames'] > 0:
     game = data['dates'][0]['games'][0]
     game_pk = game['gamePk']
@@ -339,14 +343,23 @@ if data['totalGames'] > 0:
 
     st.subheader(f"🏟️ Matchup: Reds vs {opponent} | Venue: {park_name}")
     
-    if opp_pitcher_name == 'TBD':
-        st.warning("Official lineup card not submitted. Select the starter manually.", icon="⚠️")
-        opp_roster = get_roster(opp_team_id)
-        opp_pitchers = {p['person']['fullName']: p['person']['id'] for p in opp_roster if p['position']['abbreviation'] == 'P'}
-        if opp_pitchers:
-            manual_p = st.selectbox(f"Select {opponent} Starter:", ["Select..."] + sorted(opp_pitchers.keys()))
-            if manual_p != "Select...":
-                opp_pitcher_name, opp_pitcher_id = manual_p, opp_pitchers[manual_p]
+    # Check for TBD Starters
+    c1, c2 = st.columns(2)
+    with c1:
+        if opp_pitcher_name == 'TBD':
+            st.warning("Opponent starter not submitted.", icon="⚠️")
+            opp_roster = get_roster(opp_team_id)
+            opp_pitchers = {p['person']['fullName']: p['person']['id'] for p in opp_roster if p['position']['abbreviation'] == 'P'}
+            if opp_pitchers:
+                manual_p = st.selectbox(f"Select {opponent} Starter:", ["Select..."] + sorted(opp_pitchers.keys()))
+                if manual_p != "Select...":
+                    opp_pitcher_name, opp_pitcher_id = manual_p, opp_pitchers[manual_p]
+    with c2:
+        if reds_pitcher_name == 'TBD':
+            st.warning("Reds starter not submitted.", icon="⚠️")
+            manual_r = st.selectbox(f"Select Reds Starter:", ["Select..."] + sorted(pitchers.keys()))
+            if manual_r != "Select...":
+                reds_pitcher_name, reds_pitcher_id = manual_r, pitchers[manual_r]
 
     pitcher_hand = get_pitcher_hand(opp_pitcher_id)
     split_code, split_label = ("vl", "LHP") if pitcher_hand == "L" else ("vr", "RHP")
@@ -355,9 +368,6 @@ if data['totalGames'] > 0:
         st.info(f"**Targeting Opposing Starter:** {opp_pitcher_name} ({split_label})", icon="🎯")
     
     st.divider()
-    roster_res = get_roster(113)
-    hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
-    pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
     feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
     try:
@@ -455,7 +465,9 @@ if data['totalGames'] > 0:
                     cons_score = int((hit_games / 10.0) * 22.5) if l10_total > 0 else 0
                     hrr_score = int(min(22.5, (l10_hrr_avg / 2.5) * 22.5))
                     
-                    total_score = split_score + cons_score + hrr_score + pitcher_score + lineup_score + bvp_bonus
+                    raw_score = split_score + cons_score + hrr_score + pitcher_score + lineup_score + bvp_bonus
+                    total_score = min(100, max(0, raw_score)) # Hard cap at 100
+                    
                     tier = "🟢 Tier 1" if total_score >= 75 else "🟡 Tier 2" if total_score >= 55 else "🔴 Tier 3"
                     
                     scan_results.append({
@@ -650,6 +662,7 @@ if data['totalGames'] > 0:
                 if p_res.status_code == 200 and p_res.json():
                     df_ptrack = pd.DataFrame(p_res.json())
                     df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy()
+                    df_pending = df_ptrack[df_ptrack['graded'] == 0].copy()
                     
                     if not df_pactive.empty:
                         df_pactive['delta'] = df_pactive['actual_outs'] - df_pactive['projected_outs']
@@ -659,11 +672,17 @@ if data['totalGames'] > 0:
                         st.metric("Average Miss", f"{avg_miss:.1f} Outs", help="How many outs the engine misses by on average. Closer to 0 is better.")
                         st.divider()
                         
+                        st.markdown("#### Graded Pitcher Logs")
                         df_pdisplay = df_pactive[['date', 'player_name', 'projected_outs', 'actual_outs', 'delta']].sort_values(by='date', ascending=False)
                         df_pdisplay['delta'] = df_pdisplay['delta'].apply(lambda x: f"{x:+.1f}")
                         st.dataframe(df_pdisplay, hide_index=True, use_container_width=True)
                     else:
                         st.info("No graded pitching predictions yet.")
+                        
+                    if not df_pending.empty:
+                        st.markdown("#### ⏳ Pending Projections")
+                        st.caption("Waiting for the game to reach 'Final' status to pull actual outs.")
+                        st.dataframe(df_pending[['date', 'player_name', 'projected_outs']], hide_index=True, use_container_width=True)
 
     with tab4:
         st.markdown("### 🔍 Batter Deep Dive")
