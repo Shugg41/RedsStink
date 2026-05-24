@@ -29,11 +29,45 @@ except:
     SUPABASE_URL = None
     DB_HEADERS = None
 
-# LAZY AUTOMATION (Upgraded for Doubleheaders & Postponements)
+def calc_ip(ip_str):
+    try:
+        ip = str(ip_str)
+        if '.' in ip:
+            whole, partial = ip.split('.')
+            return int(whole) + (int(partial) / 3.0)
+        return int(ip)
+    except:
+        return 0.0
+
+def calculate_fip(stats):
+    try:
+        api_fip = stats.get('fip', stats.get('fieldingIndependentPitching', '0.00'))
+        if api_fip != '0.00' and api_fip != '-.--':
+            return f"{float(api_fip):.2f}"
+            
+        hr = int(stats.get('homeRuns', 0))
+        bb = int(stats.get('baseOnBalls', 0))
+        hbp = int(stats.get('hitBatsmen', stats.get('hitByPitch', 0)))
+        k = int(stats.get('strikeOuts', 0))
+        ip = calc_ip(stats.get('inningsPitched', '0.0'))
+        
+        if ip <= 0: return "0.00"
+        fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.20
+        return f"{max(0, fip):.2f}"
+    except:
+        return "0.00"
+
+# LAZY AUTOMATION (Upgraded with DB Cleanup and Delay handling)
 def auto_grade_past_predictions():
     if not SUPABASE_URL: return
     today_str = datetime.now().strftime("%Y-%m-%d")
     
+    # ONE-TIME CLEANUP: Fix pitchers incorrectly graded with 0 outs due to past delays
+    try:
+        requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.1&actual_outs=eq.0", json={"graded": -1}, headers=DB_HEADERS)
+    except:
+        pass
+
     # Fetch ungraded dates
     url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&select=date"
     res = requests.get(url, headers=DB_HEADERS)
@@ -56,7 +90,7 @@ def auto_grade_past_predictions():
             if sched.get('totalGames', 0) > 0:
                 games = sched['dates'][0]['games']
                 final_games = [g for g in games if g['status']['statusCode'] in ['F', 'O', 'CR', 'FR']]
-                all_postponed = all(g['status']['statusCode'] in ['C', 'P', 'D', 'DI'] for g in games)
+                all_postponed = all(g['status']['statusCode'] in ['C', 'P'] for g in games) # Canceled or Postponed only
                 
                 if final_games:
                     all_players_dict = {}
@@ -113,42 +147,15 @@ def auto_grade_past_predictions():
                             else:
                                 requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
                                              json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
-                elif all_postponed or (d < today_str and not any(g['status']['statusCode'] in ['I', 'S'] for g in games)):
+                elif all_postponed or (d < today_str and not any(g['status']['statusCode'] in ['I', 'S', 'D', 'DI'] for g in games)):
+                    # VOID them properly (graded = -1) so they don't count towards averages
                     requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": -1}, headers=DB_HEADERS)
             else:
                 requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": -1}, headers=DB_HEADERS)
         except Exception as e:
             pass
-
-def calc_ip(ip_str):
-    try:
-        ip = str(ip_str)
-        if '.' in ip:
-            whole, partial = ip.split('.')
-            return int(whole) + (int(partial) / 3.0)
-        return int(ip)
-    except:
-        return 0.0
-
-def calculate_fip(stats):
-    try:
-        api_fip = stats.get('fip', stats.get('fieldingIndependentPitching', '0.00'))
-        if api_fip != '0.00' and api_fip != '-.--':
-            return f"{float(api_fip):.2f}"
-            
-        hr = int(stats.get('homeRuns', 0))
-        bb = int(stats.get('baseOnBalls', 0))
-        hbp = int(stats.get('hitBatsmen', stats.get('hitByPitch', 0)))
-        k = int(stats.get('strikeOuts', 0))
-        ip = calc_ip(stats.get('inningsPitched', '0.0'))
-        
-        if ip <= 0: return "0.00"
-        fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.20
-        return f"{max(0, fip):.2f}"
-    except:
-        return "0.00"
 
 @st.cache_data(ttl=86400)
 def get_league_hitting(year):
@@ -305,9 +312,7 @@ def get_pitcher_hand(pitcher_id):
     try: return res['people'][0]['pitchHand']['code']
     except: return "R"
 
-# ==========================================
-# EXECUTE AUTO-GRADER NOW THAT ALL FUNCTIONS ARE LOADED
-# ==========================================
+# EXECUTE AUTO-GRADER
 auto_grade_past_predictions()
 
 with st.sidebar:
@@ -761,4 +766,3 @@ if data and data.get('totalGames', 0) > 0:
             st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False), hide_index=True, use_container_width=True)
 
 else: st.warning("🌴 **OFF DAY:** The Reds are resting today.")
-
