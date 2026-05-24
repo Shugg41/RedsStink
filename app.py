@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -29,96 +30,98 @@ except:
     SUPABASE_URL = None
     DB_HEADERS = None
 
-# LAZY AUTOMATION
+# LAZY AUTOMATION (Upgraded for Doubleheaders & Postponements)
 def auto_grade_past_predictions():
     if not SUPABASE_URL: return
+    today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Grade Hitters (Ignore date, just look for ungraded)
+    # Fetch ungraded dates
     url = f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.0&select=date"
     res = requests.get(url, headers=DB_HEADERS)
-    
-    dates_to_grade = []
-    if res.status_code == 200 and res.json():
-        dates_to_grade.extend([row['date'] for row in res.json()])
+    dates_to_grade = set()
+    if getattr(res, 'status_code', 500) == 200 and isinstance(res.json(), list):
+        dates_to_grade.update([row['date'] for row in res.json()])
         
-    # Grade Pitchers (Ignore date, just look for ungraded)
     p_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.0&select=date"
     p_res = requests.get(p_url, headers=DB_HEADERS)
-    if p_res.status_code == 200 and p_res.json():
-        dates_to_grade.extend([row['date'] for row in p_res.json()])
-
-    dates_to_grade = list(set(dates_to_grade))
+    if getattr(p_res, 'status_code', 500) == 200 and isinstance(p_res.json(), list):
+        dates_to_grade.update([row['date'] for row in p_res.json()])
 
     for d in dates_to_grade:
         sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}"
         try:
-            sched = requests.get(sched_url).json()
-            if sched['totalGames'] > 0:
-                game = sched['dates'][0]['games'][0]
-                status = game['status']['statusCode']
+            sched_res = requests.get(sched_url)
+            if sched_res.status_code != 200: continue
+            sched = sched_res.json()
+            
+            if sched.get('totalGames', 0) > 0:
+                games = sched['dates'][0]['games']
+                final_games = [g for g in games if g['status']['statusCode'] in ['F', 'O', 'CR', 'FR']]
+                all_postponed = all(g['status']['statusCode'] in ['C', 'P', 'D', 'DI'] for g in games)
                 
-                # If game is final, grade it immediately
-                if status in ['F', 'O', 'CR']:
-                    game_pk = game['gamePk']
-                    feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-                    feed = requests.get(feed_url).json()
-                    box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
+                if final_games:
+                    all_players_dict = {}
+                    reds_batters_all = []
                     
-                    players_dict = {**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})}
+                    for game in final_games:
+                        game_pk = game['gamePk']
+                        feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+                        feed = requests.get(feed_url).json()
+                        box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
+                        
+                        all_players_dict.update({**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})})
+                        
+                        if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
+                            reds_batters_all.extend(box.get('away', {}).get('batters', []))
+                        else:
+                            reds_batters_all.extend(box.get('home', {}).get('batters', []))
                     
-                    if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
-                        reds_batters = box.get('away', {}).get('batters', [])
-                    else:
-                        reds_batters = box.get('home', {}).get('batters', [])
-                    
-                    # Process Hitters
-                    preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS).json()
-                    if preds_res:
-                        tier_map = {str(p['player_id']): p.get('tier', '') for p in preds_res}
+                    # Grade Hitters
+                    preds = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
+                    if getattr(preds, 'status_code', 500) == 200 and isinstance(preds.json(), list) and preds.json():
+                        tier_map = {str(p['player_id']): p.get('tier', '') for p in preds.json()}
                         requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
                         
-                        for p_id in reds_batters:
+                        for p_id in reds_batters_all:
                             p_key = f"ID{p_id}"
-                            stats = players_dict.get(p_key, {}).get('stats', {}).get('batting', {})
+                            stats = all_players_dict.get(p_key, {}).get('stats', {}).get('batting', {})
                             pa = stats.get('plateAppearances', 0)
-                            
                             if pa > 0:
                                 hits = stats.get('hits', 0)
                                 runs = stats.get('runs', 0)
                                 rbi = stats.get('rbi', 0)
                                 hrr = hits + runs + rbi
-                                
                                 player_tier = tier_map.get(str(p_id), "")
                                 if "Tier 3" in player_tier:
                                     win = 1 if (hits == 0 and hrr <= 1) else 0
                                 else:
                                     win = 1 if (hits > 0 or hrr > 1) else 0
-                                
                                 requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
-                                             json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, 
-                                             headers=DB_HEADERS)
-                                             
-                    # Process Pitchers
-                    p_preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS).json()
-                    if p_preds_res:
-                        for p_pred in p_preds_res:
+                                             json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, headers=DB_HEADERS)
+                    
+                    # Grade Pitchers
+                    p_preds = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
+                    if getattr(p_preds, 'status_code', 500) == 200 and isinstance(p_preds.json(), list) and p_preds.json():
+                        for p_pred in p_preds.json():
                             p_id = p_pred['player_id']
                             p_key = f"ID{p_id}"
-                            if p_key in players_dict:
-                                stats = players_dict.get(p_key, {}).get('stats', {}).get('pitching', {})
+                            if p_key in all_players_dict:
+                                stats = all_players_dict.get(p_key, {}).get('stats', {}).get('pitching', {})
                                 ip_str = stats.get('inningsPitched', '0.0')
                                 actual_outs = int(round(calc_ip(ip_str) * 3))
                                 requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                             json={"actual_outs": actual_outs, "graded": 1}, 
-                                             headers=DB_HEADERS)
+                                             json={"actual_outs": actual_outs, "graded": 1}, headers=DB_HEADERS)
                             else:
                                 requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                             json={"actual_outs": 0, "graded": 1}, 
-                                             headers=DB_HEADERS)
-        except:
+                                             json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+                elif all_postponed or (d < today_str and not any(g['status']['statusCode'] in ['I', 'S'] for g in games)):
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+            else:
+                requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", json={"graded": 1, "win": -1}, headers=DB_HEADERS)
+                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+        except Exception as e:
             pass
-
-auto_grade_past_predictions()
 
 def calc_ip(ip_str):
     try:
@@ -303,6 +306,11 @@ def get_pitcher_hand(pitcher_id):
     try: return res['people'][0]['pitchHand']['code']
     except: return "R"
 
+# ==========================================
+# EXECUTE AUTO-GRADER NOW THAT ALL FUNCTIONS ARE LOADED
+# ==========================================
+auto_grade_past_predictions()
+
 with st.sidebar:
     st.image("https://a.espncdn.com/i/teamlogos/mlb/500/cin.png", width=100)
     st.title("Settings")
@@ -310,9 +318,17 @@ with st.sidebar:
     date_str = selected_date.strftime("%Y-%m-%d")
     current_year = selected_date.year
 
+    data = get_schedule(date_str)
+    game_idx = 0
+    if data and data.get('totalGames', 0) > 1:
+        st.warning("⚾ Doubleheader Detected!")
+        games_list = data['dates'][0]['games']
+        game_choices = [f"Game {i+1}" for i in range(len(games_list))]
+        selected_game = st.selectbox("Select Matchup", game_choices)
+        game_idx = game_choices.index(selected_game)
+
 st.title("🔴 Reds Matchup & Prop Engine")
 
-data = get_schedule(date_str)
 reds_pitcher_name, reds_pitcher_id, opp_pitcher_name, opp_pitcher_id = "TBD", None, "TBD", None
 opponent, opp_team_id, park_name = "Unknown", None, "Unknown"
 is_pregame = False
@@ -321,8 +337,8 @@ roster_res = get_roster(113)
 hitters = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
 pitchers = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-if data['totalGames'] > 0:
-    game = data['dates'][0]['games'][0]
+if data and data.get('totalGames', 0) > 0:
+    game = data['dates'][0]['games'][game_idx]
     game_pk = game['gamePk']
     park_name = game.get('venue', {}).get('name', 'Unknown')
     
@@ -479,7 +495,7 @@ if data['totalGames'] > 0:
                 
                 if SUPABASE_URL:
                     check_url = f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}&select=date"
-                    if not requests.get(check_url, headers=DB_HEADERS).json():
+                    if getattr(requests.get(check_url, headers=DB_HEADERS), 'status_code', 500) == 200 and not requests.get(check_url, headers=DB_HEADERS).json():
                         if is_pregame:
                             insert_data = []
                             for r in scan_results:
@@ -582,7 +598,7 @@ if data['totalGames'] > 0:
                     
                     if SUPABASE_URL:
                         check_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}&player_id=eq.{target_id}"
-                        if not requests.get(check_url, headers=DB_HEADERS).json():
+                        if getattr(requests.get(check_url, headers=DB_HEADERS), 'status_code', 500) == 200 and not requests.get(check_url, headers=DB_HEADERS).json():
                             if is_pregame:
                                 insert_data = {
                                     "date": date_str, "player_id": target_id, "player_name": pitcher_target,
@@ -619,7 +635,7 @@ if data['totalGames'] > 0:
         if SUPABASE_URL:
             with hit_tab:
                 res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
-                if res.status_code == 200 and res.json():
+                if getattr(res, 'status_code', 500) == 200 and res.json():
                     df_track = pd.DataFrame(res.json())
                     df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)].copy()
                     
@@ -668,7 +684,7 @@ if data['totalGames'] > 0:
 
             with pitch_tab:
                 p_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
-                if p_res.status_code == 200 and p_res.json():
+                if getattr(p_res, 'status_code', 500) == 200 and p_res.json():
                     df_ptrack = pd.DataFrame(p_res.json())
                     df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy()
                     df_pending = df_ptrack[df_ptrack['graded'] == 0].copy()
@@ -746,3 +762,6 @@ if data['totalGames'] > 0:
             st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False), hide_index=True, use_container_width=True)
 
 else: st.warning("🌴 **OFF DAY:** The Reds are resting today.")
+
+
+```
