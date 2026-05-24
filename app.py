@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -763,5 +762,3 @@ if data and data.get('totalGames', 0) > 0:
 
 else: st.warning("🌴 **OFF DAY:** The Reds are resting today.")
 
-
-```
