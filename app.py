@@ -651,3 +651,16 @@ if data and data.get('totalGames', 0) > 0:
                 s = get_season_stats(h_id, "hitting", current_year, split="vr")['stats'][0]['splits'][0]['stat']
                 st.markdown(f"**AVG:** {s.get('avg', '.000')} | **OPS:** {s.get('ops', '.000')} | **HR:** {s.get('homeRuns', 0)}")
             except: st.info("No stats vs RHP.")
+            
+        st.divider()
+        st.markdown("#### Last 10 Games")
+        logs = get_game_logs(h_id, current_year)
+        if logs:
+            l10_list = []
+            for l in logs[-10:]:
+                s = l.get('stat', {})
+                l10_list.append({"Date": l.get('date', ''), "Opp": l.get('opponent', {}).get('name', ''), "Hits": s.get('hits', 0), "HR": s.get('homeRuns', 0), "K": s.get('strikeOuts', 0)})
+            st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False), hide_index=True, use_container_width=True)
+
+else: 
+    st.warning("🌴 **OFF DAY:** The Reds are resting today.")
