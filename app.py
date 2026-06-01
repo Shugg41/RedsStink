@@ -63,6 +63,9 @@ def calculate_fip(stats):
     except:
         return "0.00"
 
+def normalize_name(name):
+    return name.lower().replace(".", "").replace(" jr", "").replace(" sr", "").replace("-", " ").strip()
+
 # LAZY AUTOMATION
 def auto_grade_past_predictions():
     if not SUPABASE_URL: return
@@ -94,7 +97,7 @@ def auto_grade_past_predictions():
             if sched.get('totalGames', 0) > 0:
                 games = sched['dates'][0]['games']
                 final_games = [g for g in games if g['status']['statusCode'] in ['F', 'O', 'CR', 'FR']]
-                all_postponed = all(g['status']['statusCode'] in ['C', 'P'] for g in games)
+                all_postponed = all(g['status']['statusCode'] in ['C', 'P', 'D', 'DI'] for g in games)
                 
                 if final_games:
                     all_players_dict = {}
@@ -303,23 +306,29 @@ def get_pitcher_hand(pitcher_id):
 # ODDS API CALL
 def get_draftkings_odds():
     if not ODDS_API_KEY: return {}
-    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=batter_hits&bookmakers=draftkings"
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=player_batter_hits&bookmakers=draftkings"
     try:
-        res = requests.get(url).json()
+        res = requests.get(url)
+        if res.status_code != 200:
+            st.sidebar.error(f"API Failed: {res.text}")
+            return {}
+            
         odds_dict = {}
-        for game in res:
+        for game in res.json():
             for book in game.get('bookmakers', []):
                 for market in book.get('markets', []):
-                    if market['key'] == 'batter_hits':
+                    if market['key'] == 'player_batter_hits':
                         for outcome in market.get('outcomes', []):
-                            player = outcome.get('description', '')
+                            player_name = outcome.get('description', '')
                             if outcome.get('name') == 'Over':
-                                odds_dict[player] = {
+                                odds_dict[normalize_name(player_name)] = {
                                     'line': outcome.get('point', 0.5),
                                     'price': outcome.get('price', 0)
                                 }
         return odds_dict
-    except: return {}
+    except Exception as e: 
+        st.sidebar.error(f"Odds API Request Error: {str(e)}")
+        return {}
 
 # EXECUTE AUTO-GRADER
 auto_grade_past_predictions()
@@ -521,7 +530,7 @@ if data and data.get('totalGames', 0) > 0:
                     tier = "🟢 Tier 1" if total_score >= 75 else "🟡 Tier 2" if total_score >= 55 else "🔴 Tier 3"
                     
                     # Match DK Odds if available
-                    dk_info = live_odds.get(name, {})
+                    dk_info = live_odds.get(normalize_name(name), {})
                     dk_str = f"O {dk_info.get('line', 0.5)} Hits ({dk_info.get('price', 'N/A')})" if dk_info else "N/A"
                     
                     scan_results.append({
@@ -555,9 +564,116 @@ if data and data.get('totalGames', 0) > 0:
                         st.divider()
 
     with tab2:
-        st.markdown("### ⚾ Pitcher Engine (Background Tracking)")
-        st.info("Outs projection is tracking in the background. Check the System Tracker tab to view graded logs.")
-        # Keeping this lightweight for now while we focus on the hitting update.
+        col1, col2 = st.columns([1, 2])
+        r_pitchers = sorted(pitchers.keys())
+        def_idx = r_pitchers.index(reds_pitcher_name) if reds_pitcher_name in r_pitchers else 0
+        with col1:
+            pitcher_target = st.selectbox("Select Reds Pitcher", r_pitchers, index=def_idx)
+            target_id = pitchers[pitcher_target]
+            
+        facing_team_id = opp_team_id
+        facing_team_name = opponent
+        
+        p_hand = get_pitcher_hand(target_id)
+        p_split_code, p_split_label = ("vl", "LHP") if p_hand == "L" else ("vr", "RHP")
+        
+        st.markdown(f"### 🎯 Pitcher Form (Last 5 Starts)")
+        p_logs = get_game_logs(target_id, current_year, group="pitching")
+        avg_k = 0.0
+        if p_logs:
+            l5 = p_logs[-5:]
+            total_k = sum(g.get('stat', {}).get('strikeOuts', 0) for g in l5)
+            total_ip = sum(calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) for g in l5)
+            total_pitches = sum(g.get('stat', {}).get('numberOfPitches', 0) for g in l5)
+            starts = len(l5)
+            
+            avg_k = round(total_k / starts, 1)
+            avg_ip = round(total_ip / starts, 1)
+            
+            median_pitches = statistics.median([g.get('stat', {}).get('numberOfPitches', 0) for g in l5])
+            median_outs = statistics.median([int(round(calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) * 3)) for g in l5])
+            
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Avg Strikeouts", avg_k)
+            p2.metric("Avg Innings Pitched", avg_ip)
+            p3.metric("Avg Pitch Count", int(total_pitches / starts))
+            
+            st.divider()
+            
+            adv_pitch = get_advanced_pitching(target_id, current_year)
+            whip = float(adv_pitch.get('whip', '1.30'))
+            whip_adj = -1.0 if whip > 1.45 else (-0.5 if whip > 1.30 else (0.5 if whip < 1.10 else 0.0))
+            
+            era_val = float(adv_pitch.get('era', '4.00'))
+            try: fip_val = float(calculate_fip(adv_pitch))
+            except: fip_val = 4.00
+            fip_diff = fip_val - era_val
+            fip_adj = -0.5 if fip_diff >= 0.50 else (0.5 if fip_diff <= -0.50 else 0.0)
+            
+            team_splits = get_team_splits(facing_team_id, current_year, p_split_code)
+            opp_ops = float(team_splits.get('ops', '.730'))
+            ops_adj = -1.0 if opp_ops > .800 else (-0.5 if opp_ops > .750 else (0.5 if opp_ops < .650 else 0.0))
+            
+            opp_ppa = float(team_splits.get('pitchesPerPlateAppearance', '3.85'))
+            ppa_adj = -0.5 if opp_ppa > 4.0 else (0.5 if opp_ppa < 3.75 else 0.0)
+            
+            pa = int(team_splits.get('plateAppearances', 0))
+            so = int(team_splits.get('strikeOuts', 0))
+            opp_k_pct = (so / pa) if pa > 0 else 0.22
+            k_adj = 1.0 if opp_k_pct > 0.28 else (0.5 if opp_k_pct > 0.25 else (-0.5 if opp_k_pct < 0.20 else 0.0))
+            
+            rp_ip = get_bullpen_fatigue(113)
+            bp_adj = 1.0 if rp_ip >= 14 else (0.5 if rp_ip >= 11 else 0.0)
+            
+            hitter_parks = ['Great American Ball Park', 'Coors Field', 'Fenway Park']
+            pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park']
+            park_adj = -0.5 if park_name in hitter_parks else (0.5 if park_name in pitcher_parks else 0.0)
+            
+            final_proj = round(median_outs + whip_adj + fip_adj + ops_adj + ppa_adj + k_adj + bp_adj + park_adj, 1)
+            
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.markdown(f"#### 🧾 Engine Receipt: {pitcher_target}")
+                st.markdown(f"**Base Projection (Median Outs):** {median_outs:.1f}")
+                st.markdown(f"**WHIP Modifier ({whip}):** {whip_adj:+.1f}")
+                st.markdown(f"**FIP Regression (FIP {fip_val:.2f} vs ERA {era_val:.2f}):** {fip_adj:+.1f}")
+                st.markdown(f"**{facing_team_name} OPS vs {p_split_label} ({opp_ops:.3f}):** {ops_adj:+.1f}")
+                st.markdown(f"**{facing_team_name} K% vs {p_split_label} ({opp_k_pct*100:.1f}%):** {k_adj:+.1f}")
+                st.markdown(f"**{facing_team_name} P/PA ({opp_ppa}):** {ppa_adj:+.1f}")
+                st.markdown(f"**Bullpen Fatigue ({rp_ip:.1f} IP L3 Days):** {bp_adj:+.1f}")
+                st.markdown(f"**Park Factor ({park_name}):** {park_adj:+.1f}")
+                st.divider()
+                st.markdown(f"### 🎯 Final Projected Outs: {final_proj}")
+                
+                if SUPABASE_URL:
+                    check_url = f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}&player_id=eq.{target_id}"
+                    if getattr(requests.get(check_url, headers=DB_HEADERS), 'status_code', 500) == 200 and not requests.get(check_url, headers=DB_HEADERS).json():
+                        if is_pregame:
+                            insert_data = {
+                                "date": date_str, "player_id": target_id, "player_name": pitcher_target,
+                                "projected_outs": final_proj, "actual_outs": 0, "graded": 0
+                            }
+                            requests.post(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", json=insert_data, headers=DB_HEADERS)
+                            st.success(f"✅ Projection for {pitcher_target} auto-saved to tracker.")
+                        else:
+                            st.warning("⚠️ Game has started. Projections are locked and will not be saved to tracker.")
+            
+            with c2:
+                st.markdown("#### 📋 Last 5 Starts Log")
+                log_data = []
+                for g in reversed(l5):
+                    s = g.get('stat', {})
+                    o = int(round(calc_ip(s.get('inningsPitched', '0.0')) * 3))
+                    log_data.append({
+                        "Date": g.get('date', ''),
+                        "Opp": g.get('opponent', {}).get('name', ''),
+                        "Pitches": s.get('numberOfPitches', 0),
+                        "Outs": o
+                    })
+                st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
+                
+        else:
+            st.info(f"No 2026 pitching logs found for {pitcher_name}.")
 
     with tab3:
         st.markdown("### 📊 Engine Performance")
@@ -584,13 +700,28 @@ if data and data.get('totalGames', 0) > 0:
                         t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
                         t1_units = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
                         
+                        l7_date = df_active['date_obj'].max() - pd.Timedelta(days=7)
+                        df_l7 = df_active[df_active['date_obj'] >= l7_date]
+                        l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
+                        
                         st.markdown("#### 🎯 Tier Performance & Units")
                         tier_grp = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
+                        
                         top_cols = st.columns(len(tier_grp) + 1)
                         top_cols[0].metric("🥇 T1 Units", f"{t1_units:+g} U")
-                        for i, r in tier_grp.iterrows(): top_cols[i+1].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
+                        
+                        for i, r in tier_grp.iterrows():
+                            top_cols[i+1].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
+                        
                         st.divider()
                         
+                        with st.expander("📊 View Overall System Metrics"):
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Overall Win %", f"{win_rate:.1f}%")
+                            c2.metric("L7 Win %", f"{l7_win_rate:.1f}%")
+                            c3.metric("System Score", f"{sys_score:g}")
+                        
+                        st.markdown("#### Recent Graded Logs")
                         df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']].sort_values(by='date', ascending=False)
                         df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
                         st.dataframe(df_display.drop(columns=['win']), hide_index=True, use_container_width=True)
