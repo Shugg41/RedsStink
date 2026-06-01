@@ -423,56 +423,83 @@ def _mark_no_game(d):
         pass
 
 def _grade_final_games(final_games, d, today_str):
-    all_players_dict, reds_batters_all = {}, []
+    # Build a per-game lookup: game_pk -> (players_dict, reds_batters)
+    # Also build a pooled fallback for legacy rows that have no game_pk.
+    per_game = {}
+    pooled_players, pooled_batters = {}, []
     for game in final_games:
+        gpk = game.get('gamePk')
         try:
             feed = requests.get(f"https://statsapi.mlb.com/api/v1.1/game/{game['gamePk']}/feed/live").json()
             box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
-            all_players_dict.update({**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})})
+            players = {**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})}
             if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
-                reds_batters_all.extend(box.get('away', {}).get('batters', []))
+                batters = box.get('away', {}).get('batters', [])
             else:
-                reds_batters_all.extend(box.get('home', {}).get('batters', []))
+                batters = box.get('home', {}).get('batters', [])
+            per_game[gpk] = (players, batters)
+            pooled_players.update(players)
+            pooled_batters.extend(batters)
         except:
             pass
 
-    # Grade hitting predictions
+    def _grade_hit_row(p_row, players_dict):
+        p_id = p_row['player_id']
+        tier = p_row.get('tier', '')
+        stats = players_dict.get(f"ID{p_id}", {}).get('stats', {}).get('batting', {})
+        if int(stats.get('plateAppearances', 0)) > 0:
+            hits = stats.get('hits', 0)
+            hrr  = hits + stats.get('runs', 0) + stats.get('rbi', 0)
+            win  = (1 if (hits == 0 and hrr <= 1) else 0) if "Tier 3" in tier else (1 if (hits > 0 or hrr > 1) else 0)
+            return {"actual_hits": hits, "actual_hrr": hrr, "win": win, "graded": 1}
+        return None
+
+    # ---- Grade hitting predictions, per game_pk ----
     try:
         preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
         if preds_res.status_code == 200 and preds_res.json():
-            tier_map = {str(p['player_id']): p.get('tier', '') for p in preds_res.json()}
-            requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}",
+            rows = preds_res.json()
+            # default everything to no-result first (win=-1); real results overwrite
+            requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
                            json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-            for p_id in reds_batters_all:
-                stats = all_players_dict.get(f"ID{p_id}", {}).get('stats', {}).get('batting', {})
-                if int(stats.get('plateAppearances', 0)) > 0:
-                    hits = stats.get('hits', 0)
-                    hrr  = hits + stats.get('runs', 0) + stats.get('rbi', 0)
-                    tier = tier_map.get(str(p_id), "")
-                    win  = (1 if (hits == 0 and hrr <= 1) else 0) if "Tier 3" in tier else (1 if (hits > 0 or hrr > 1) else 0)
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&player_id=eq.{p_id}",
-                                   json={"actual_hits": hits, "actual_hrr": hrr, "win": win}, headers=DB_HEADERS)
+            for p_row in rows:
+                gpk = p_row.get('game_pk')
+                # Pick the right box score: this game if tagged, else pooled (legacy)
+                if gpk is not None and gpk in per_game:
+                    players_dict, _ = per_game[gpk]
+                else:
+                    players_dict = pooled_players
+                patch = _grade_hit_row(p_row, players_dict)
+                if patch:
+                    # Scope the update to the exact row (date+player+game_pk if present)
+                    q = f"date=eq.{d}&player_id=eq.{p_row['player_id']}"
+                    if gpk is not None:
+                        q += f"&game_pk=eq.{gpk}"
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?{q}",
+                                   json=patch, headers=DB_HEADERS)
     except:
         pass
 
-    # Grade pitcher predictions — STRIKEOUTS (new K engine)
-    # Legacy rows that only have projected_outs (no projected_ks) are left untouched.
+    # ---- Grade pitcher predictions (strikeouts), per game_pk ----
     try:
         p_preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
         if p_preds_res.status_code == 200 and p_preds_res.json():
             for p_pred in p_preds_res.json():
-                # Skip legacy outs-only rows (no K projection) — clean break
                 if p_pred.get('projected_ks') is None:
-                    continue
-                p_id  = p_pred['player_id']
-                p_key = f"ID{p_id}"
-                if p_key in all_players_dict:
-                    k_actual = int(all_players_dict[p_key].get('stats', {}).get('pitching', {}).get('strikeOuts', 0))
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                   json={"actual_ks": k_actual, "graded": 1}, headers=DB_HEADERS)
+                    continue  # legacy outs-only row, skip
+                p_id = p_pred['player_id']
+                gpk  = p_pred.get('game_pk')
+                if gpk is not None and gpk in per_game:
+                    players_dict, _ = per_game[gpk]
                 else:
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                   json={"actual_ks": 0, "graded": 1}, headers=DB_HEADERS)
+                    players_dict = pooled_players
+                p_key = f"ID{p_id}"
+                k_actual = int(players_dict.get(p_key, {}).get('stats', {}).get('pitching', {}).get('strikeOuts', 0)) if p_key in players_dict else 0
+                q = f"player_id=eq.{p_id}&date=eq.{d}"
+                if gpk is not None:
+                    q += f"&game_pk=eq.{gpk}"
+                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?{q}",
+                               json={"actual_ks": k_actual, "graded": 1}, headers=DB_HEADERS)
     except:
         pass
 
@@ -1346,6 +1373,7 @@ if data and data.get('totalGames', 0) > 0:
                     if is_pregame:
                         insert_data = [{
                             "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
+                            "game_pk": int(game_pk),
                             "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
                             "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0,
                             "odds_line":  r['DK_Info'].get('line')  if r['DK_Info'] else None,
@@ -1355,9 +1383,10 @@ if data and data.get('totalGames', 0) > 0:
                             "babip":   (float(r['BABIP']) if r['BABIP'] not in (None, '.000', '') else None),
                             "k_pct":   r['K_Pct'], "iso": r['ISO'], "opp_fip": r['Opp_FIP']
                         } for r in scan_results]
-                        # merge-duplicates upsert relies on UNIQUE (date, player_id)
+                        # merge-duplicates upsert keyed on (date, player_id, game_pk)
+                        # so doubleheaders (same date+player, different game) stay separate
                         save_res = requests.post(
-                            f"{SUPABASE_URL}/rest/v1/predictions?on_conflict=date,player_id",
+                            f"{SUPABASE_URL}/rest/v1/predictions?on_conflict=date,player_id,game_pk",
                             json=insert_data, headers=DB_HEADERS_UPSERT
                         )
                         if save_res.status_code in (200, 201):
@@ -1512,12 +1541,13 @@ if data and data.get('totalGames', 0) > 0:
                         "date": date_str,
                         "player_id": kp["player_id"],
                         "player_name": kp["player_name"],
+                        "game_pk": int(game_pk),
                         "projected_ks": kp["projected_ks"],
                         "actual_ks": 0,
                         "graded": 0
                     } for kp in k_projections]
                     ksave = requests.post(
-                        f"{SUPABASE_URL}/rest/v1/pitcher_predictions?on_conflict=date,player_id",
+                        f"{SUPABASE_URL}/rest/v1/pitcher_predictions?on_conflict=date,player_id,game_pk",
                         json=payload, headers=DB_HEADERS_UPSERT
                     )
                     if ksave.status_code in (200, 201):
