@@ -595,25 +595,69 @@ def get_pitcher_k_stats(pitcher_id, year):
 # ODDS API
 # ============================================================
 def get_draftkings_odds():
-    if not ODDS_API_KEY: return {}
-    url = (f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/"
-           f"?apiKey={ODDS_API_KEY}&regions=us&markets=player_batter_hits&bookmakers=draftkings")
+    """Fetch DraftKings batter_hits props for the REDS game only.
+
+    Free-tier friendly: lists events (cheap), finds the Reds matchup, then
+    pulls batter_hits for that ONE event. ~1 credit per fetch instead of one
+    per game on the slate. Market key is 'batter_hits' (no 'player_' prefix);
+    player props are only served via /events/{id}/odds, not the slate /odds.
+    """
+    if not ODDS_API_KEY:
+        return {}
+
+    base = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
     try:
-        res = requests.get(url)
-        if res.status_code != 200:
-            st.error(f"Odds API failed: {res.text}")
+        # --- Step 1: list events (cheap, no markets) ---
+        ev_res = requests.get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
+        if ev_res.status_code != 200:
+            st.error(f"Odds API (events) failed: {ev_res.text[:200]}")
             return {}
+        events = ev_res.json()
+        if not events:
+            st.warning("No MLB events returned by the odds provider right now.")
+            return {}
+
+        # --- Find the Reds event only ---
+        reds_event_id = None
+        for ev in events:
+            home = ev.get('home_team', '')
+            away = ev.get('away_team', '')
+            if 'Reds' in home or 'Reds' in away:
+                reds_event_id = ev.get('id')
+                break
+
+        if not reds_event_id:
+            st.warning("No Reds game found on the odds provider's slate for today.")
+            return {}
+
+        # --- Step 2: pull batter_hits for the Reds event (1 credit) ---
+        o_res = requests.get(
+            f"{base}/events/{reds_event_id}/odds",
+            params={
+                "apiKey": ODDS_API_KEY,
+                "regions": "us",
+                "markets": "batter_hits",
+                "bookmakers": "draftkings",
+                "oddsFormat": "american",
+            }
+        )
+        if o_res.status_code != 200:
+            st.error(f"Odds API (Reds event) failed: {o_res.text[:200]}")
+            return {}
+
         odds_dict = {}
-        for game in res.json():
-            for book in game.get('bookmakers', []):
-                for market in book.get('markets', []):
-                    if market['key'] == 'player_batter_hits':
-                        for outcome in market.get('outcomes', []):
-                            if outcome.get('name') == 'Over':
-                                odds_dict[normalize_name(outcome.get('description', ''))] = {
-                                    'line':  outcome.get('point', 0.5),
-                                    'price': outcome.get('price', 0)
-                                }
+        game = o_res.json()
+        for book in game.get('bookmakers', []):
+            for market in book.get('markets', []):
+                if market['key'] == 'batter_hits':
+                    for outcome in market.get('outcomes', []):
+                        if outcome.get('name') == 'Over':
+                            odds_dict[normalize_name(outcome.get('description', ''))] = {
+                                'line':  outcome.get('point', 0.5),
+                                'price': outcome.get('price', 0)
+                            }
+        if not odds_dict:
+            st.warning("Found the Reds game, but no DraftKings batter-hits lines are posted yet (often not until a few hours before first pitch).")
         return odds_dict
     except Exception as e:
         st.error(f"Odds API error: {str(e)}")
