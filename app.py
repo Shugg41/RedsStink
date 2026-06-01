@@ -1304,9 +1304,12 @@ if data and data.get('totalGames', 0) > 0:
                         'park_name': park_name, 'lineup_pos': lineup_pos_val, 'babip': babip
                     })
 
-                    # Disagreement flag: do the two engines cross a tier line?
+                    # Disagreement flag: only fire when TIER 1 is involved on either
+                    # engine — that's the only disagreement that affects a real bet.
                     def _tier_rank(t): return 1 if "Tier 1" in t else (2 if "Tier 2" in t else 3)
-                    engines_disagree = _tier_rank(tier) != _tier_rank(mult_tier)
+                    tiers_cross   = _tier_rank(tier) != _tier_rank(mult_tier)
+                    t1_involved   = ("Tier 1" in tier) or ("Tier 1" in mult_tier)
+                    engines_disagree = tiers_cross and t1_involved
 
                     dk_info = live_odds.get(normalize_name(name), {})
 
@@ -1370,8 +1373,9 @@ if data and data.get('totalGames', 0) > 0:
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
                     for idx_c, (_, row) in enumerate(df.iterrows(), start=1):
                         render_player_card(row, split_label, idx_c)
-                        # Show receipt if either engine flags Tier 1, or they disagree
-                        if ("Tier 1" in row['Tier']) or ("Tier 1" in str(row.get('Mult_Tier',''))) or row.get('Disagree'):
+                        # Show receipt if either engine flags Tier 1 (disagreements now
+                        # only flag when T1 is involved, so this covers them too)
+                        if ("Tier 1" in row['Tier']) or ("Tier 1" in str(row.get('Mult_Tier',''))):
                             render_receipt(row)
 
     # ----------------------------------------------------------
