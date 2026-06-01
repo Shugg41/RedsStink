@@ -190,6 +190,35 @@ st.markdown("""
     .grade-b { color: #9acd32; }
     .grade-c { color: #e6a817; }
     .grade-d { color: #C6011F; }
+
+    /* Dual-engine display */
+    .mult-chip {
+        display: inline-block;
+        background: #14233a;
+        border: 1px solid #2d4a6b;
+        color: #7fb3ff;
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 2px 10px;
+        border-radius: 14px;
+        letter-spacing: 0.5px;
+        margin-left: 8px;
+    }
+    .disagree-flag {
+        display: inline-block;
+        background: #3a2e0a;
+        border: 1px solid #e6a817;
+        color: #e6a817;
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 14px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        margin-left: 8px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -203,9 +232,25 @@ WEIGHT_PITCHER       = 10   # Max pts: opponent ERA bonus
 WEIGHT_BVP           = 10   # Max pts: batter vs pitcher history
 LINEUP_TOP_BONUS     =  5   # Batting 1-3 bonus
 LINEUP_BOT_PENALTY   = -5   # Batting 7-9 penalty
-BABIP_PENALTY        = -8   # High BABIP + hot streak guardrail
+BABIP_PENALTY        = -8   # (legacy flat penalty — no longer used; see scaled version)
 TIER1_THRESHOLD      = 75
 TIER2_THRESHOLD      = 55
+
+# Scaled BABIP guardrail (used by BOTH engines)
+BABIP_THRESHOLD      = 0.340  # regression watch line
+BABIP_PER_010        = 1.0    # additive: -1 pt per .010 above threshold
+BABIP_ADD_CAP        = -20    # additive penalty floor
+
+# ============================================================
+# MULTIPLICATIVE ENGINE CONFIG (side-by-side experiment)
+# ============================================================
+# Baseline blend (must sum to 1.0) — leaning on stable season quality
+MULT_W_SEASON        = 0.50   # OPS+ / ISO anchor (regression-proof)
+MULT_W_CONTACT       = 0.25   # K%-based contact floor
+MULT_W_RECENT        = 0.25   # L10 involvement (hit-game rate)
+# Modifier bands — every modifier clamped to this range so none runs away
+MULT_MOD_FLOOR       = 0.80
+MULT_MOD_CEIL        = 1.20
 
 # ============================================================
 # STRIKEOUT ENGINE WEIGHTS
@@ -763,6 +808,123 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     return projected_k, receipt
 
 # ============================================================
+# SCALED BABIP PENALTY (additive engine) — replaces flat -8
+# ============================================================
+def scaled_babip_penalty(babip_str):
+    """-1 pt per .010 of BABIP above .340, floored at BABIP_ADD_CAP (-20)."""
+    try:
+        b = float(babip_str)
+    except:
+        return 0
+    if b <= BABIP_THRESHOLD:
+        return 0
+    over = b - BABIP_THRESHOLD
+    pen  = -(over / 0.010) * BABIP_PER_010
+    return int(round(max(BABIP_ADD_CAP, pen)))
+
+# ============================================================
+# MULTIPLICATIVE ENGINE (side-by-side experiment)
+# ============================================================
+def _clamp_mod(x):
+    return max(MULT_MOD_FLOOR, min(MULT_MOD_CEIL, x))
+
+def run_multiplicative_engine(inputs):
+    """
+    inputs: dict with keys
+      ops_plus (str/N/A), iso (str), k_pct (float 0-1), l10_hit_rate (0-1),
+      opp_fip (float), park_name (str), lineup_pos (int or None),
+      babip (str)
+    Returns (mult_score int 0-100, mult_tier str, baseline int, receipt list[(label,val,detail)]).
+    Receipt vals: baseline is a 0-100 int; modifiers are multipliers (e.g. 0.88).
+    """
+    receipt = []
+
+    # ---- BASELINE: blend of season quality / contact / recent involvement ----
+    # Season quality from OPS+ (100 = league avg -> ~60 baseline pts), ISO nudges.
+    try:
+        opsp = float(inputs.get('ops_plus')) if inputs.get('ops_plus') not in (None, "N/A") else 100.0
+    except:
+        opsp = 100.0
+    # Map OPS+ ~ [60,160] -> [30,90]; 100 -> 60
+    season_sub = max(0, min(100, 60 + (opsp - 100) * 0.5))
+    try:
+        iso = float(inputs.get('iso', 0) or 0)
+        season_sub = min(100, season_sub + (iso - 0.140) * 40)  # ISO above .140 nudges up
+    except:
+        pass
+
+    # Contact floor from K%: 12% -> ~85, 22% -> ~60, 32% -> ~35
+    try:
+        kp = float(inputs.get('k_pct', 0.22) or 0.22)
+    except:
+        kp = 0.22
+    contact_sub = max(0, min(100, 60 + (0.22 - kp) * 250))
+
+    # Recent involvement from L10 hit-game rate (0-1)
+    try:
+        rate = float(inputs.get('l10_hit_rate', 0.0) or 0.0)
+    except:
+        rate = 0.0
+    recent_sub = max(0, min(100, rate * 100))
+
+    baseline = (MULT_W_SEASON * season_sub +
+                MULT_W_CONTACT * contact_sub +
+                MULT_W_RECENT * recent_sub)
+    baseline = int(round(max(0, min(100, baseline))))
+    receipt.append(("Baseline (blend)", baseline,
+                    f"season {int(season_sub)} / contact {int(contact_sub)} / recent {int(recent_sub)}"))
+
+    # ---- MATCHUP MODIFIER: starter FIP + park ----
+    try:
+        fip = float(inputs.get('opp_fip', 4.00) or 4.00)
+    except:
+        fip = 4.00
+    # Lower FIP (better pitcher) -> modifier below 1.0. 4.00 neutral.
+    fip_mod = 1.0 + (fip - 4.00) * 0.06  # each run of FIP = 6% swing
+    park = inputs.get('park_name', '')
+    hitter_parks  = ['Great American Ball Park', 'Coors Field', 'Fenway Park', 'Globe Life Field',
+                     'American Family Field', 'Guaranteed Rate Field']
+    pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park', 'Petco Park',
+                     'Kauffman Stadium', 'Truist Park']
+    park_mod = 1.05 if park in hitter_parks else (0.95 if park in pitcher_parks else 1.0)
+    matchup_mod = _clamp_mod(fip_mod * park_mod)
+    receipt.append(("Matchup (FIP × park)", round(matchup_mod, 3),
+                    f"opp FIP {fip:.2f}, park {'hitter' if park in hitter_parks else ('pitcher' if park in pitcher_parks else 'neutral')}"))
+
+    # ---- LUCK MODIFIER: BABIP regression ----
+    try:
+        b = float(inputs.get('babip', 0) or 0)
+    except:
+        b = 0.0
+    if b > BABIP_THRESHOLD:
+        luck_mod = _clamp_mod(1.0 - (b - BABIP_THRESHOLD) * 2.0)  # .420 -> ~0.84
+    else:
+        luck_mod = 1.0
+    receipt.append(("Luck / BABIP regression", round(luck_mod, 3), f"BABIP {b:.3f}"))
+
+    # ---- LINEUP MODIFIER ----
+    pos = inputs.get('lineup_pos')
+    if pos is None:
+        lineup_mod = 1.0
+        lp_detail = "no confirmed lineup"
+    elif pos <= 2:
+        lineup_mod = 1.05; lp_detail = f"batting {pos+1} (top)"
+    elif pos >= 6:
+        lineup_mod = 0.92; lp_detail = f"batting {pos+1} (bottom)"
+    else:
+        lineup_mod = 1.0;  lp_detail = f"batting {pos+1}"
+    lineup_mod = _clamp_mod(lineup_mod)
+    receipt.append(("Lineup spot", round(lineup_mod, 3), lp_detail))
+
+    # ---- FINAL ----
+    final = baseline * matchup_mod * luck_mod * lineup_mod
+    mult_score = int(round(max(0, min(100, final))))
+    mult_tier  = ("🟢 Tier 1" if mult_score >= TIER1_THRESHOLD
+                  else "🟡 Tier 2" if mult_score >= TIER2_THRESHOLD
+                  else "🔴 Tier 3")
+    return mult_score, mult_tier, baseline, receipt
+
+# ============================================================
 # PLAYER CARD HTML
 # ============================================================
 def render_player_card(row, split_label, idx):
@@ -789,13 +951,22 @@ def render_player_card(row, split_label, idx):
 
     bvp_display = f"{row['BVP_Avg']:.3f}" if row['BVP_Avg'] > 0 else "—"
 
+    # Dual-engine display: multiplicative score chip + disagreement flag
+    mult_score = row.get('Mult_Score')
+    mult_tier  = row.get('Mult_Tier', '')
+    mult_chip  = ""
+    if mult_score is not None:
+        m_emoji = "🟢" if "Tier 1" in mult_tier else ("🟡" if "Tier 2" in mult_tier else "🔴")
+        mult_chip = f'<span class="mult-chip">MULT: {mult_score} {m_emoji}</span>'
+    disagree_flag = '<span class="disagree-flag">⚠ engines differ</span>' if row.get('Disagree') else ""
+
     st.markdown(f"""
     <div class="{card_cls}">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
             <div style="display:flex; align-items:center; gap:12px;">
                 <span class="player-score">{row['Score']}</span>
                 <div>
-                    <p class="player-name">#{idx} {row['Player']}</p>
+                    <p class="player-name">#{idx} {row['Player']} {mult_chip}{disagree_flag}</p>
                     <span class="tier-badge {badge_cls}">{badge_text}</span>
                 </div>
             </div>
@@ -813,24 +984,57 @@ def render_player_card(row, split_label, idx):
     """, unsafe_allow_html=True)
 
 def render_receipt(row):
-    """Render collapsible engine receipt for Tier 1 players."""
+    """Render collapsible engine receipt — additive and/or multiplicative."""
     receipt = row.get('Receipt', {})
-    if not receipt:
+    mult_receipt = row.get('Mult_Receipt', [])
+    if not receipt and not mult_receipt:
         return
-    with st.expander("🧾 Engine Receipt"):
+    label = "🧾 Engine Receipt"
+    if row.get('Disagree'):
+        label = "⚠️ Engine Receipt (engines disagree)"
+    with st.expander(label):
         lines_html = ""
-        for label, val in receipt.items():
+        if receipt:
+            lines_html += '<div class="receipt-line" style="color:#C6011F;font-weight:700;"><span>ADDITIVE ENGINE</span><span></span></div>'
+        for label_k, val in receipt.items():
             css = color_val(val)
             lines_html += f"""
             <div class="receipt-line">
-                <span>{label}</span>
+                <span>{label_k}</span>
                 <span class="{css}">{signed(val)}</span>
             </div>"""
-        lines_html += f"""
-        <div class="receipt-total">
-            <span>FINAL SCORE</span>
-            <span>{row['Score']}/100</span>
-        </div>"""
+        if receipt:
+            lines_html += f"""
+            <div class="receipt-total">
+                <span>FINAL SCORE (Additive)</span>
+                <span>{row['Score']}/100</span>
+            </div>"""
+
+        # Multiplicative breakdown (baseline × modifiers)
+        mult_receipt = row.get('Mult_Receipt', [])
+        if mult_receipt:
+            lines_html += '<div style="margin-top:14px;border-top:1px solid #333;padding-top:8px;"></div>'
+            lines_html += '<div class="receipt-line" style="color:#7fb3ff;font-weight:700;"><span>MULTIPLICATIVE ENGINE</span><span></span></div>'
+            for label, val, detail in mult_receipt:
+                if label.startswith("Baseline"):
+                    lines_html += f"""
+                    <div class="receipt-line">
+                        <span>{label} <small style="color:#555;">({detail})</small></span>
+                        <span class="receipt-neu">{val}</span>
+                    </div>"""
+                else:
+                    css = "receipt-pos" if val > 1.0 else ("receipt-neg" if val < 1.0 else "receipt-neu")
+                    lines_html += f"""
+                    <div class="receipt-line">
+                        <span>{label} <small style="color:#555;">({detail})</small></span>
+                        <span class="{css}">×{val}</span>
+                    </div>"""
+            lines_html += f"""
+            <div class="receipt-total" style="color:#7fb3ff;">
+                <span>FINAL SCORE (Mult)</span>
+                <span>{row.get('Mult_Score','—')}/100 · {row.get('Mult_Tier','')}</span>
+            </div>"""
+
         st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{lines_html}</div>',
                     unsafe_allow_html=True)
 
@@ -1047,6 +1251,7 @@ if data and data.get('totalGames', 0) > 0:
                             l10_hrr_avg = round(sum((g['stat'].get('hits', 0) + g['stat'].get('runs', 0) + g['stat'].get('rbi', 0)) for g in l10) / l10_total, 1)
 
                     overall_avg, ops_plus, babip = ".000", "N/A", ".000"
+                    k_pct_val, iso_val = 0.22, 0.140
                     ov_data  = get_season_stats(p_id, "hitting", current_year)
                     adv_hit  = get_advanced_hitting(p_id, current_year)
                     try:
@@ -1056,6 +1261,10 @@ if data and data.get('totalGames', 0) > 0:
                         babip       = adv_hit.get('babip', '.000')
                     except:
                         pass
+                    try:    k_pct_val = float(adv_hit.get('strikeoutsPerPlateAppearance', 0.22) or 0.22)
+                    except: k_pct_val = 0.22
+                    try:    iso_val = float(adv_hit.get('iso', 0.140) or 0.140)
+                    except: iso_val = 0.140
 
                     split_ops = 0.0
                     sp_data   = get_season_stats(p_id, "hitting", current_year, split=split_code)
@@ -1074,20 +1283,30 @@ if data and data.get('totalGames', 0) > 0:
                         bvp_avg   = float(bvp.get('avg', 0))
                         bvp_bonus = 10 if bvp_avg >= .350 else (5 if bvp_avg >= .250 else 0)
 
-                    # --- Scoring ---
+                    # --- Scoring (ADDITIVE engine — unchanged except scaled BABIP) ---
                     split_score = int(min(WEIGHT_SPLIT,      max(0, (split_ops - 0.500) * 50)))
                     cons_score  = int((hit_games / 10.0) * WEIGHT_CONSISTENCY) if l10_total > 0 else 0
                     hrr_score   = int(min(WEIGHT_HRR, (l10_hrr_avg / 2.5) * WEIGHT_HRR))
-                    penalty     = 0
-                    try:
-                        if float(babip) > .350 and hit_games >= 6:
-                            penalty = BABIP_PENALTY
-                    except:
-                        pass
+                    penalty     = scaled_babip_penalty(babip)  # scaled, -1/.010 over .340, cap -20
 
                     raw_score   = split_score + cons_score + hrr_score + pitcher_score + lineup_score + bvp_bonus + penalty
                     total_score = min(100, max(0, raw_score))
                     tier        = "🟢 Tier 1" if total_score >= TIER1_THRESHOLD else ("🟡 Tier 2" if total_score >= TIER2_THRESHOLD else "🔴 Tier 3")
+
+                    # --- MULTIPLICATIVE engine (side-by-side) ---
+                    lineup_pos_val = idx_pos if (reds_batting_order and p_id in reds_batting_order) else None
+                    l10_hit_rate   = (hit_games / l10_total) if l10_total > 0 else 0.0
+                    try:    opp_fip_val = float(calculate_fip(adv_stats)) if adv_stats else 4.00
+                    except: opp_fip_val = 4.00
+                    mult_score, mult_tier, mult_baseline, mult_receipt = run_multiplicative_engine({
+                        'ops_plus': ops_plus, 'iso': iso_val, 'k_pct': k_pct_val,
+                        'l10_hit_rate': l10_hit_rate, 'opp_fip': opp_fip_val,
+                        'park_name': park_name, 'lineup_pos': lineup_pos_val, 'babip': babip
+                    })
+
+                    # Disagreement flag: do the two engines cross a tier line?
+                    def _tier_rank(t): return 1 if "Tier 1" in t else (2 if "Tier 2" in t else 3)
+                    engines_disagree = _tier_rank(tier) != _tier_rank(mult_tier)
 
                     dk_info = live_odds.get(normalize_name(name), {})
 
@@ -1101,7 +1320,7 @@ if data and data.get('totalGames', 0) > 0:
                             f"Pitcher ERA Bonus":                      pitcher_score,
                             f"Lineup Position Bonus":                  lineup_score,
                             f"BvP History":                            bvp_bonus,
-                            f"BABIP Guardrail":                        penalty,
+                            f"BABIP Guardrail (scaled)":               penalty,
                         }
 
                     scan_results.append({
@@ -1109,7 +1328,12 @@ if data and data.get('totalGames', 0) > 0:
                         "Avg": overall_avg, "Raw_OPS": split_ops, "L10_HRR": l10_hrr_avg,
                         "L10_Hits": l10_h_avg, "BVP_Avg": bvp_avg,
                         "OPS_Display": f"{split_ops:.3f}", "OPS_Plus": ops_plus,
-                        "DK_Info": dk_info, "Receipt": receipt
+                        "DK_Info": dk_info, "Receipt": receipt,
+                        # multiplicative + diagnostics
+                        "Mult_Score": mult_score, "Mult_Tier": mult_tier,
+                        "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
+                        "Disagree": engines_disagree,
+                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val
                     })
 
                 pb.empty()
@@ -1122,7 +1346,11 @@ if data and data.get('totalGames', 0) > 0:
                             "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
                             "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0,
                             "odds_line":  r['DK_Info'].get('line')  if r['DK_Info'] else None,
-                            "odds_price": r['DK_Info'].get('price') if r['DK_Info'] else None
+                            "odds_price": r['DK_Info'].get('price') if r['DK_Info'] else None,
+                            "mult_score": r['Mult_Score'], "mult_tier": r['Mult_Tier'],
+                            "mult_baseline": r['Mult_Baseline'],
+                            "babip":   (float(r['BABIP']) if r['BABIP'] not in (None, '.000', '') else None),
+                            "k_pct":   r['K_Pct'], "iso": r['ISO'], "opp_fip": r['Opp_FIP']
                         } for r in scan_results]
                         # merge-duplicates upsert relies on UNIQUE (date, player_id)
                         save_res = requests.post(
@@ -1142,7 +1370,8 @@ if data and data.get('totalGames', 0) > 0:
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
                     for idx_c, (_, row) in enumerate(df.iterrows(), start=1):
                         render_player_card(row, split_label, idx_c)
-                        if "Tier 1" in row['Tier']:
+                        # Show receipt if either engine flags Tier 1, or they disagree
+                        if ("Tier 1" in row['Tier']) or ("Tier 1" in str(row.get('Mult_Tier',''))) or row.get('Disagree'):
                             render_receipt(row)
 
     # ----------------------------------------------------------
