@@ -1008,6 +1008,18 @@ if data and data.get('totalGames', 0) > 0:
             if not opp_pitcher_id:
                 st.error("Select pitcher first.")
             else:
+                # --- Auto-fetch odds if not already loaded for this date ---
+                # Guarantees fresh odds are present at save time even after a reload,
+                # but reuses session odds if already fetched today (0 extra credits).
+                if not (st.session_state.get('dk_odds_date') == date_str and st.session_state.get('dk_odds')):
+                    with st.spinner("Auto-fetching DraftKings lines..."):
+                        auto_fetched = get_draftkings_odds()
+                        if auto_fetched:
+                            st.session_state['dk_odds']      = auto_fetched
+                            st.session_state['dk_odds_date'] = date_str
+                # refresh local handle after potential auto-fetch
+                live_odds = st.session_state['dk_odds'] if st.session_state.get('dk_odds_date') == date_str else {}
+
                 pb           = st.progress(0, text="Evaluating roster...")
                 scan_results = []
                 league_stats = get_league_hitting(current_year)
@@ -1316,61 +1328,59 @@ if data and data.get('totalGames', 0) > 0:
                         sys_score   = df_active['points'].sum()
 
                         # ============================================
-                        # PROOF LAYER — does the engine actually work?
+                        # PROOF LAYER — Tier 1 only (the bets actually placed)
                         # ============================================
                         st.markdown("#### 🔬 Engine Proof Layer")
+                        st.caption("Measured on TIER 1 plays only — the tier you actually bet.")
 
-                        # --- Brier score (lower = better calibrated). Uses score/100 as implied prob. ---
-                        # For Tier 3 (fade), the "win" already means the fade hit, so prob = (100-score)/100.
-                        def implied_prob(row):
-                            p = row['score'] / 100.0
-                            return (1.0 - p) if "Tier 3" in row['tier'] else p
-                        df_active['model_prob'] = df_active.apply(implied_prob, axis=1)
-                        df_active['brier']       = (df_active['model_prob'] - df_active['win']) ** 2
-                        brier = df_active['brier'].mean()
+                        df_t1 = df_active[df_active['tier'].str.contains("Tier 1", na=False)].copy()
 
-                        # Brier grade: 0.25 = coin flip, lower is better
-                        if   brier <= 0.17: b_grade, b_cls = "A", "grade-a"
-                        elif brier <= 0.21: b_grade, b_cls = "B", "grade-b"
-                        elif brier <= 0.25: b_grade, b_cls = "C", "grade-c"
-                        else:               b_grade, b_cls = "D", "grade-d"
+                        # --- Brier score (Tier 1, straight bets: model_prob = score/100) ---
+                        if not df_t1.empty:
+                            df_t1['model_prob'] = df_t1['score'] / 100.0
+                            df_t1['brier']      = (df_t1['model_prob'] - df_t1['win']) ** 2
+                            brier = df_t1['brier'].mean()
+                            if   brier <= 0.17: b_grade, b_cls = "A", "grade-a"
+                            elif brier <= 0.21: b_grade, b_cls = "B", "grade-b"
+                            elif brier <= 0.25: b_grade, b_cls = "C", "grade-c"
+                            else:               b_grade, b_cls = "D", "grade-d"
+                            brier_sub = f"{brier:.3f} &nbsp; (0.25 = coin flip) · {len(df_t1)} T1 plays"
+                        else:
+                            b_grade, b_cls, brier_sub = "—", "receipt-neu", "No graded Tier 1 plays yet"
 
-                        # --- ROI (units), only on rows that had odds stored ---
+                        # --- ROI / units (Tier 1 with stored odds) ---
                         roi_txt, units_txt = "N/A (no odds yet)", "—"
-                        has_odds = df_active.dropna(subset=['odds_price']) if 'odds_price' in df_active.columns else pd.DataFrame()
-                        # Tier 3 fades: skip ROI (no clean price for a fade) — track straight tiers only
-                        has_odds = has_odds[~has_odds['tier'].str.contains("Tier 3", na=False)] if not has_odds.empty else has_odds
-                        if not has_odds.empty:
-                            has_odds = has_odds.copy()
-                            has_odds['units'] = has_odds.apply(lambda r: units_won(r['odds_price'], r['win']), axis=1)
-                            total_units = has_odds['units'].sum()
-                            roi_pct     = (total_units / len(has_odds)) * 100
+                        t1_odds = df_t1.dropna(subset=['odds_price']) if ('odds_price' in df_t1.columns and not df_t1.empty) else pd.DataFrame()
+                        if not t1_odds.empty:
+                            t1_odds = t1_odds.copy()
+                            t1_odds['units'] = t1_odds.apply(lambda r: units_won(r['odds_price'], r['win']), axis=1)
+                            total_units = t1_odds['units'].sum()
+                            roi_pct     = (total_units / len(t1_odds)) * 100
                             units_txt   = f"{total_units:+.2f} U"
                             roi_txt     = f"{roi_pct:+.1f}%"
 
                         pc1, pc2, pc3 = st.columns(3)
                         with pc1:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">Calibration Grade (Brier)</div>'
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 Calibration Grade (Brier)</div>'
                                         f'<div class="proof-big {b_cls}">{b_grade}</div>'
-                                        f'<div class="proof-label">{brier:.3f} &nbsp; (0.25 = coin flip)</div></div>',
+                                        f'<div class="proof-label">{brier_sub}</div></div>',
                                         unsafe_allow_html=True)
                         with pc2:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">ROI (graded, w/ odds)</div>'
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 ROI (graded, w/ odds)</div>'
                                         f'<div class="proof-big">{roi_txt}</div>'
-                                        f'<div class="proof-label">{len(has_odds)} priced bets</div></div>',
+                                        f'<div class="proof-label">{len(t1_odds)} priced T1 bets</div></div>',
                                         unsafe_allow_html=True)
                         with pc3:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">Net Units</div>'
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 Net Units</div>'
                                         f'<div class="proof-big">{units_txt}</div>'
                                         f'<div class="proof-label">1U flat stake</div></div>',
                                         unsafe_allow_html=True)
 
                         st.divider()
 
-                        # --- CALIBRATION CHART: score bucket vs actual hit rate ---
+                        # --- CALIBRATION CHART: score bucket vs actual hit rate (straight tiers) ---
                         st.markdown("#### 🎯 Calibration: Predicted Score vs Actual Hit Rate")
-                        st.caption("If the engine works, hit rate should climb as score climbs. Flat or jumpy = miscalibrated.")
-                        # Only straight tiers (1 & 2); Tier 3 is a fade so its 'win' is inverted logic
+                        st.caption("All straight tiers (1 & 2), bucketed by score. If the engine works, hit rate should climb as score climbs.")
                         df_straight = df_active[~df_active['tier'].str.contains("Tier 3", na=False)].copy()
                         if not df_straight.empty:
                             bins   = [0, 55, 65, 75, 85, 101]
