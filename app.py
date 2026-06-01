@@ -29,14 +29,14 @@ st.markdown("""
     .player-card {
         background: linear-gradient(135deg, #1a1a1a 0%, #212121 100%);
         border: 1px solid #2e2e2e;
-        border-left: 5px solid #C6011F;
+        border-left: 5px solid #4caf50;
         border-radius: 8px;
         padding: 16px 20px;
         margin-bottom: 12px;
         position: relative;
     }
     .player-card.tier2 { border-left-color: #e6a817; }
-    .player-card.tier3 { border-left-color: #555; }
+    .player-card.tier3 { border-left-color: #C6011F; }
 
     .player-name {
         font-family: 'Barlow Condensed', sans-serif;
