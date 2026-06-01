@@ -1114,7 +1114,7 @@ if data and data.get('totalGames', 0) > 0:
                         } for r in scan_results]
                         # merge-duplicates upsert relies on UNIQUE (date, player_id)
                         save_res = requests.post(
-                            f"{SUPABASE_URL}/rest/v1/predictions",
+                            f"{SUPABASE_URL}/rest/v1/predictions?on_conflict=date,player_id",
                             json=insert_data, headers=DB_HEADERS_UPSERT
                         )
                         if save_res.status_code in (200, 201):
@@ -1272,7 +1272,7 @@ if data and data.get('totalGames', 0) > 0:
                         "graded": 0
                     } for kp in k_projections]
                     ksave = requests.post(
-                        f"{SUPABASE_URL}/rest/v1/pitcher_predictions",
+                        f"{SUPABASE_URL}/rest/v1/pitcher_predictions?on_conflict=date,player_id",
                         json=payload, headers=DB_HEADERS_UPSERT
                     )
                     if ksave.status_code in (200, 201):
