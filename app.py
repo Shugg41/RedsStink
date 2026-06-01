@@ -164,6 +164,32 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 1px;
     }
+
+    /* Calibration / proof layer */
+    .proof-card {
+        background: linear-gradient(135deg, #1a1a1a 0%, #212121 100%);
+        border: 1px solid #2e2e2e;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 12px;
+    }
+    .proof-big {
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 34px;
+        font-weight: 700;
+        line-height: 1;
+    }
+    .proof-label {
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 13px;
+        color: #888;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    .grade-a { color: #4caf50; }
+    .grade-b { color: #9acd32; }
+    .grade-c { color: #e6a817; }
+    .grade-d { color: #C6011F; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -203,9 +229,13 @@ try:
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
+    # Upsert variant: merge duplicates on conflict instead of erroring
+    DB_HEADERS_UPSERT = dict(DB_HEADERS)
+    DB_HEADERS_UPSERT["Prefer"] = "resolution=merge-duplicates,return=representation"
 except:
     SUPABASE_URL = None
     DB_HEADERS = None
+    DB_HEADERS_UPSERT = None
 
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
@@ -263,6 +293,37 @@ def color_val(v):
 def signed(v):
     return f"{v:+g}"
 
+def american_to_decimal(price):
+    """Convert American odds (e.g. -115, +120) to decimal payout multiplier."""
+    try:
+        price = float(price)
+        if price > 0:
+            return 1.0 + (price / 100.0)
+        elif price < 0:
+            return 1.0 + (100.0 / abs(price))
+        return 1.0
+    except:
+        return 1.0
+
+def american_to_implied_prob(price):
+    """Convert American odds to implied win probability (0-1), vig included."""
+    try:
+        price = float(price)
+        if price > 0:
+            return 100.0 / (price + 100.0)
+        elif price < 0:
+            return abs(price) / (abs(price) + 100.0)
+        return 0.0
+    except:
+        return 0.0
+
+def units_won(price, won):
+    """Units won/lost on a 1-unit bet given American price and W/L (1/0)."""
+    if won == 1:
+        return round(american_to_decimal(price) - 1.0, 3)  # net profit on win
+    else:
+        return -1.0  # lose the staked unit
+
 # ============================================================
 # AUTO-GRADER — 30-min guard
 # ============================================================
@@ -276,14 +337,6 @@ def auto_grade_past_predictions():
     st.session_state['last_autograde_time'] = now
 
     today_str = now.strftime("%Y-%m-%d")
-
-    try:
-        requests.patch(
-            f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.1&actual_outs=eq.0",
-            json={"graded": -1}, headers=DB_HEADERS
-        )
-    except:
-        pass
 
     dates_to_grade = set()
     for endpoint in ["predictions", "pitcher_predictions"]:
@@ -320,7 +373,7 @@ def _mark_no_game(d):
         requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
                        json={"graded": 1, "win": -1}, headers=DB_HEADERS)
         requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0",
-                       json={"actual_outs": 0, "graded": -1}, headers=DB_HEADERS)
+                       json={"actual_ks": 0, "graded": -1}, headers=DB_HEADERS)
     except:
         pass
 
@@ -357,21 +410,24 @@ def _grade_final_games(final_games, d, today_str):
     except:
         pass
 
-    # Grade pitcher predictions
+    # Grade pitcher predictions — STRIKEOUTS (new K engine)
+    # Legacy rows that only have projected_outs (no projected_ks) are left untouched.
     try:
         p_preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
         if p_preds_res.status_code == 200 and p_preds_res.json():
             for p_pred in p_preds_res.json():
+                # Skip legacy outs-only rows (no K projection) — clean break
+                if p_pred.get('projected_ks') is None:
+                    continue
                 p_id  = p_pred['player_id']
                 p_key = f"ID{p_id}"
                 if p_key in all_players_dict:
-                    ip_str     = all_players_dict[p_key].get('stats', {}).get('pitching', {}).get('inningsPitched', '0.0')
-                    actual_outs = int(round(calc_ip(ip_str) * 3))
+                    k_actual = int(all_players_dict[p_key].get('stats', {}).get('pitching', {}).get('strikeOuts', 0))
                     requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                   json={"actual_outs": actual_outs, "graded": 1}, headers=DB_HEADERS)
+                                   json={"actual_ks": k_actual, "graded": 1}, headers=DB_HEADERS)
                 else:
                     requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?player_id=eq.{p_id}&date=eq.{d}",
-                                   json={"actual_outs": 0, "graded": 1}, headers=DB_HEADERS)
+                                   json={"actual_ks": 0, "graded": 1}, headers=DB_HEADERS)
     except:
         pass
 
@@ -596,7 +652,6 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     try:
         k_pct  = float(adv.get('strikeoutsPerPlateAppearance', adv.get('kPct', '0.22')))
         bb_pct = float(adv.get('walksPerPlateAppearance', adv.get('bbPct', '0.08')))
-        # Whiff proxy: high K%, low BB% = elite swing-and-miss
         if k_pct >= 0.28:   swstr_adj = SK_SWSTR_BONUS
         elif k_pct >= 0.24: swstr_adj = SK_SWSTR_BONUS * 0.5
         elif k_pct <= 0.17: swstr_adj = -SK_SWSTR_BONUS
@@ -1003,19 +1058,28 @@ if data and data.get('totalGames', 0) > 0:
 
                 pb.empty()
 
-                # --- Save to Supabase ---
+                # --- Save to Supabase (UPSERT w/ odds at pick time) ---
                 if SUPABASE_URL:
-                    check_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}&select=date", headers=DB_HEADERS)
-                    if check_res.status_code == 200 and not check_res.json():
-                        if is_pregame:
-                            insert_data = [{
-                                "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
-                                "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
-                                "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0
-                            } for r in scan_results]
-                            requests.post(f"{SUPABASE_URL}/rest/v1/predictions", json=insert_data, headers=DB_HEADERS)
+                    if is_pregame:
+                        insert_data = [{
+                            "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
+                            "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
+                            "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0,
+                            "odds_line":  r['DK_Info'].get('line')  if r['DK_Info'] else None,
+                            "odds_price": r['DK_Info'].get('price') if r['DK_Info'] else None
+                        } for r in scan_results]
+                        # merge-duplicates upsert relies on UNIQUE (date, player_id)
+                        save_res = requests.post(
+                            f"{SUPABASE_URL}/rest/v1/predictions",
+                            json=insert_data, headers=DB_HEADERS_UPSERT
+                        )
+                        if save_res.status_code in (200, 201):
+                            odds_count = sum(1 for r in scan_results if r['DK_Info'])
+                            st.success(f"💾 Saved {len(insert_data)} predictions ({odds_count} with DK odds locked in).")
                         else:
-                            st.warning("⚠️ Game has already started. Predictions not saved.")
+                            st.warning(f"⚠️ Save issue: {save_res.status_code} — {save_res.text[:140]}")
+                    else:
+                        st.warning("⚠️ Game has already started. Predictions not saved.")
 
                 # --- Render cards ---
                 if scan_results:
@@ -1062,6 +1126,7 @@ if data and data.get('totalGames', 0) > 0:
 
         if st.button("▶ Run Strikeout Engine", type="primary"):
             col_reds, col_opp = st.columns(2)
+            k_projections = []  # collect for Supabase save
 
             with col_reds:
                 with st.spinner(f"Projecting {reds_k_pitcher}..."):
@@ -1080,13 +1145,14 @@ if data and data.get('totalGames', 0) > 0:
                             <span>{label} <small style="color:#555;">({detail})</small></span>
                             <span class="{css}">{signed(val)}</span>
                         </div>"""
-                    base_val = r_receipt[0][1] if r_receipt else 0
                     receipt_html += f"""
                     <div class="receipt-total">
                         <span>PROJECTED Ks</span>
                         <span>{r_proj_k}</span>
                     </div>"""
                     st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{receipt_html}</div>', unsafe_allow_html=True)
+
+                    k_projections.append({"player_id": reds_k_id, "player_name": reds_k_pitcher, "projected_ks": r_proj_k})
 
                     # L5 log
                     st.markdown("#### 📋 Last 5 Starts")
@@ -1109,7 +1175,6 @@ if data and data.get('totalGames', 0) > 0:
             with col_opp:
                 if opp_k_id:
                     with st.spinner(f"Projecting {opp_k_name}..."):
-                        # Reds are the opposing lineup for the other team's pitcher
                         o_proj_k, o_receipt = run_strikeout_engine(
                             opp_k_id, opp_k_name, 113, "Cincinnati Reds", park_name, current_year
                         )
@@ -1132,6 +1197,8 @@ if data and data.get('totalGames', 0) > 0:
                         </div>"""
                         st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{receipt_html}</div>', unsafe_allow_html=True)
 
+                        k_projections.append({"player_id": opp_k_id, "player_name": opp_k_name, "projected_ks": o_proj_k})
+
                         st.markdown("#### 📋 Last 5 Starts")
                         p_logs_opp = get_game_logs(opp_k_id, current_year, group="pitching")
                         if p_logs_opp:
@@ -1149,12 +1216,30 @@ if data and data.get('totalGames', 0) > 0:
                 else:
                     st.info(f"Select {opponent} pitcher to run engine.")
 
-        # Save pitcher K projections to Supabase
-        if SUPABASE_URL and is_pregame:
-            pass  # Hook for future: save K projections separately
+            # --- Save K projections to Supabase (pregame only) ---
+            if SUPABASE_URL and k_projections:
+                if is_pregame:
+                    payload = [{
+                        "date": date_str,
+                        "player_id": kp["player_id"],
+                        "player_name": kp["player_name"],
+                        "projected_ks": kp["projected_ks"],
+                        "actual_ks": 0,
+                        "graded": 0
+                    } for kp in k_projections]
+                    ksave = requests.post(
+                        f"{SUPABASE_URL}/rest/v1/pitcher_predictions",
+                        json=payload, headers=DB_HEADERS_UPSERT
+                    )
+                    if ksave.status_code in (200, 201):
+                        st.success(f"💾 Saved {len(payload)} K projection(s) — will auto-grade after the game.")
+                    else:
+                        st.warning(f"⚠️ K save issue: {ksave.status_code} — {ksave.text[:140]}")
+                else:
+                    st.info("ℹ️ Game already started — K projections shown but not saved.")
 
     # ----------------------------------------------------------
-    # TAB 3 — SYSTEM TRACKER
+    # TAB 3 — SYSTEM TRACKER (+ Proof Layer: Calibration, Brier, ROI)
     # ----------------------------------------------------------
     with tab3:
         st.markdown("### 📊 Engine Performance")
@@ -1186,15 +1271,81 @@ if data and data.get('totalGames', 0) > 0:
                         win_rate    = (total_wins / len(df_active)) * 100
                         sys_score   = df_active['points'].sum()
 
-                        t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
-                        t1_units  = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
+                        # ============================================
+                        # PROOF LAYER — does the engine actually work?
+                        # ============================================
+                        st.markdown("#### 🔬 Engine Proof Layer")
 
-                        l7_date     = df_active['date_obj'].max() - pd.Timedelta(days=7)
-                        df_l7       = df_active[df_active['date_obj'] >= l7_date]
-                        l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
+                        # --- Brier score (lower = better calibrated). Uses score/100 as implied prob. ---
+                        # For Tier 3 (fade), the "win" already means the fade hit, so prob = (100-score)/100.
+                        def implied_prob(row):
+                            p = row['score'] / 100.0
+                            return (1.0 - p) if "Tier 3" in row['tier'] else p
+                        df_active['model_prob'] = df_active.apply(implied_prob, axis=1)
+                        df_active['brier']       = (df_active['model_prob'] - df_active['win']) ** 2
+                        brier = df_active['brier'].mean()
+
+                        # Brier grade: 0.25 = coin flip, lower is better
+                        if   brier <= 0.17: b_grade, b_cls = "A", "grade-a"
+                        elif brier <= 0.21: b_grade, b_cls = "B", "grade-b"
+                        elif brier <= 0.25: b_grade, b_cls = "C", "grade-c"
+                        else:               b_grade, b_cls = "D", "grade-d"
+
+                        # --- ROI (units), only on rows that had odds stored ---
+                        roi_txt, units_txt = "N/A (no odds yet)", "—"
+                        has_odds = df_active.dropna(subset=['odds_price']) if 'odds_price' in df_active.columns else pd.DataFrame()
+                        # Tier 3 fades: skip ROI (no clean price for a fade) — track straight tiers only
+                        has_odds = has_odds[~has_odds['tier'].str.contains("Tier 3", na=False)] if not has_odds.empty else has_odds
+                        if not has_odds.empty:
+                            has_odds = has_odds.copy()
+                            has_odds['units'] = has_odds.apply(lambda r: units_won(r['odds_price'], r['win']), axis=1)
+                            total_units = has_odds['units'].sum()
+                            roi_pct     = (total_units / len(has_odds)) * 100
+                            units_txt   = f"{total_units:+.2f} U"
+                            roi_txt     = f"{roi_pct:+.1f}%"
+
+                        pc1, pc2, pc3 = st.columns(3)
+                        with pc1:
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">Calibration Grade (Brier)</div>'
+                                        f'<div class="proof-big {b_cls}">{b_grade}</div>'
+                                        f'<div class="proof-label">{brier:.3f} &nbsp; (0.25 = coin flip)</div></div>',
+                                        unsafe_allow_html=True)
+                        with pc2:
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">ROI (graded, w/ odds)</div>'
+                                        f'<div class="proof-big">{roi_txt}</div>'
+                                        f'<div class="proof-label">{len(has_odds)} priced bets</div></div>',
+                                        unsafe_allow_html=True)
+                        with pc3:
+                            st.markdown(f'<div class="proof-card"><div class="proof-label">Net Units</div>'
+                                        f'<div class="proof-big">{units_txt}</div>'
+                                        f'<div class="proof-label">1U flat stake</div></div>',
+                                        unsafe_allow_html=True)
+
+                        st.divider()
+
+                        # --- CALIBRATION CHART: score bucket vs actual hit rate ---
+                        st.markdown("#### 🎯 Calibration: Predicted Score vs Actual Hit Rate")
+                        st.caption("If the engine works, hit rate should climb as score climbs. Flat or jumpy = miscalibrated.")
+                        # Only straight tiers (1 & 2); Tier 3 is a fade so its 'win' is inverted logic
+                        df_straight = df_active[~df_active['tier'].str.contains("Tier 3", na=False)].copy()
+                        if not df_straight.empty:
+                            bins   = [0, 55, 65, 75, 85, 101]
+                            labels = ["<55", "55-64", "65-74", "75-84", "85+"]
+                            df_straight['bucket'] = pd.cut(df_straight['score'], bins=bins, labels=labels, right=False)
+                            calib = df_straight.groupby('bucket', observed=True)['win'].agg(['mean', 'count']).reset_index()
+                            calib['Hit Rate %'] = (calib['mean'] * 100).round(1)
+                            calib = calib.rename(columns={'bucket': 'Score Bucket', 'count': 'Plays'})
+                            st.bar_chart(calib.set_index('Score Bucket')['Hit Rate %'])
+                            st.dataframe(calib[['Score Bucket', 'Hit Rate %', 'Plays']], hide_index=True, use_container_width=True)
+                        else:
+                            st.info("Need graded Tier 1/2 plays to build calibration.")
+
+                        st.divider()
 
                         # --- Tier metrics ---
-                        st.markdown("#### 🎯 Tier Performance & Units")
+                        st.markdown("#### 🏅 Tier Performance & Units")
+                        t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
+                        t1_units  = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
                         tier_grp  = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
                         top_cols  = st.columns(len(tier_grp) + 1)
                         top_cols[0].metric("🥇 T1 Units", f"{t1_units:+g} U")
@@ -1218,6 +1369,9 @@ if data and data.get('totalGames', 0) > 0:
 
                         st.divider()
 
+                        l7_date     = df_active['date_obj'].max() - pd.Timedelta(days=7)
+                        df_l7       = df_active[df_active['date_obj'] >= l7_date]
+                        l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
                         with st.expander("📊 Overall System Metrics"):
                             c1, c2, c3 = st.columns(3)
                             c1.metric("Overall Win %", f"{win_rate:.1f}%")
@@ -1225,9 +1379,14 @@ if data and data.get('totalGames', 0) > 0:
                             c3.metric("System Score",  f"{sys_score:g}")
 
                         st.markdown("#### Recent Graded Logs")
-                        df_display = df_active[['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']].sort_values(by='date', ascending=False).copy()
+                        cols_show = ['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']
+                        if 'odds_line' in df_active.columns:
+                            cols_show.insert(4, 'odds_line')
+                        df_display = df_active[cols_show].sort_values(by='date', ascending=False).copy()
                         df_display['Result'] = df_display['win'].apply(lambda x: "✅ WIN" if x == 1 else "❌ LOSS")
                         st.dataframe(df_display.drop(columns=['win']), hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No graded hitting predictions yet.")
 
             with pitch_tab:
                 @st.cache_data(ttl=300)
@@ -1238,23 +1397,31 @@ if data and data.get('totalGames', 0) > 0:
                 p_raw = load_pitching_predictions()
                 if p_raw:
                     df_ptrack  = pd.DataFrame(p_raw)
-                    df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy()
-                    df_pending = df_ptrack[df_ptrack['graded'] == 0].copy()
+                    # Only K-engine rows (have projected_ks); legacy outs rows ignored
+                    if 'projected_ks' in df_ptrack.columns:
+                        df_ptrack = df_ptrack[df_ptrack['projected_ks'].notna()]
+                    df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy() if not df_ptrack.empty else pd.DataFrame()
+                    df_pending = df_ptrack[df_ptrack['graded'] == 0].copy() if not df_ptrack.empty else pd.DataFrame()
 
                     if not df_pactive.empty:
-                        df_pactive['delta']    = df_pactive['actual_outs'] - df_pactive['projected_outs']
+                        df_pactive['delta']    = df_pactive['actual_ks'] - df_pactive['projected_ks']
                         df_pactive['abs_miss'] = df_pactive['delta'].abs()
-                        st.metric("Average Miss", f"{df_pactive['abs_miss'].mean():.1f} Outs")
+                        m1, m2 = st.columns(2)
+                        m1.metric("Avg Miss", f"{df_pactive['abs_miss'].mean():.1f} Ks")
+                        m2.metric("Bias", f"{df_pactive['delta'].mean():+.1f} Ks",
+                                  help="Positive = pitchers strike out more than projected (engine runs low)")
                         st.divider()
-                        df_pdisplay = df_pactive[['date', 'player_name', 'projected_outs', 'actual_outs', 'delta']].sort_values(by='date', ascending=False).copy()
+                        df_pdisplay = df_pactive[['date', 'player_name', 'projected_ks', 'actual_ks', 'delta']].sort_values(by='date', ascending=False).copy()
                         df_pdisplay['delta'] = df_pdisplay['delta'].apply(lambda x: f"{x:+.1f}")
                         st.dataframe(df_pdisplay, hide_index=True, use_container_width=True)
                     else:
-                        st.info("No graded pitching predictions yet.")
+                        st.info("No graded K projections yet.")
 
                     if not df_pending.empty:
-                        st.markdown("#### ⏳ Pending Projections")
-                        st.dataframe(df_pending[['date', 'player_name', 'projected_outs']], hide_index=True, use_container_width=True)
+                        st.markdown("#### ⏳ Pending K Projections")
+                        st.dataframe(df_pending[['date', 'player_name', 'projected_ks']], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No pitcher predictions yet.")
 
     # ----------------------------------------------------------
     # TAB 4 — DEEP DIVE (unchanged)
