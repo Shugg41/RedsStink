@@ -251,6 +251,10 @@ MULT_W_RECENT        = 0.25   # L10 involvement (hit-game rate)
 # Modifier bands — every modifier clamped to this range so none runs away
 MULT_MOD_FLOOR       = 0.80
 MULT_MOD_CEIL        = 1.20
+# Hot-hand bonus: rewards REAL streaks (hot + sustainable BABIP), ignores mirages
+HOT_HAND_RECENT_MIN  = 70     # recent-form sub-score required to qualify as "hot"
+HOT_HAND_BABIP_MAX   = 0.340  # BABIP at/below this = streak is real, not luck
+HOT_HAND_MAX_BOOST   = 0.15   # max +15% for the hottest legit streaks
 
 # ============================================================
 # STRIKEOUT ENGINE WEIGHTS
@@ -943,8 +947,24 @@ def run_multiplicative_engine(inputs):
     lineup_mod = _clamp_mod(lineup_mod)
     receipt.append(("Lineup spot", round(lineup_mod, 3), lp_detail))
 
+    # ---- HOT-HAND MODIFIER: reward REAL streaks, not lucky ones ----
+    # Fires only when the hitter is genuinely hot (recent form high) AND the
+    # streak is sustainable (BABIP not luck-inflated). Lucky-hot guys get no
+    # boost here and still eat the luck/BABIP tax above.
+    if recent_sub >= HOT_HAND_RECENT_MIN and b <= HOT_HAND_BABIP_MAX:
+        hot_boost = 1.0 + min(HOT_HAND_MAX_BOOST, (recent_sub - 60) / 100.0)
+        hot_mod   = _clamp_mod(hot_boost)
+        hot_detail = f"hot (recent {int(recent_sub)}) + sustainable BABIP {b:.3f}"
+    else:
+        hot_mod = 1.0
+        if recent_sub >= HOT_HAND_RECENT_MIN and b > HOT_HAND_BABIP_MAX:
+            hot_detail = f"hot but BABIP {b:.3f} too high — no boost (likely luck)"
+        else:
+            hot_detail = "not on a qualifying streak"
+    receipt.append(("Hot Hand", round(hot_mod, 3), hot_detail))
+
     # ---- FINAL ----
-    final = baseline * matchup_mod * luck_mod * lineup_mod
+    final = baseline * matchup_mod * luck_mod * lineup_mod * hot_mod
     mult_score = int(round(max(0, min(100, final))))
     mult_tier  = ("🟢 Tier 1" if mult_score >= TIER1_THRESHOLD
                   else "🟡 Tier 2" if mult_score >= TIER2_THRESHOLD
