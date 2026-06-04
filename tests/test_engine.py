@@ -100,6 +100,47 @@ def test_sample_weight_garbage():
 
 
 # ------------------------------------------------------------
+# split_ops_points — platoon split, sample-gated
+# ------------------------------------------------------------
+def test_split_points_full_sample_matches_legacy_formula():
+    # At/above SPLIT_MIN_PA the old formula is preserved: int((ops-.5)*50), capped.
+    assert e.split_ops_points(0.800, e.SPLIT_MIN_PA) == 15
+    assert e.split_ops_points(0.500, e.SPLIT_MIN_PA) == 0
+    assert e.split_ops_points(1.500, e.SPLIT_MIN_PA) == e.WEIGHT_SPLIT  # capped
+
+def test_split_points_small_sample_is_shrunk():
+    full = e.split_ops_points(0.800, e.SPLIT_MIN_PA)
+    half = e.split_ops_points(0.800, e.SPLIT_MIN_PA // 2)
+    assert 0 < half < full
+
+def test_split_points_zero_pa_is_zero():
+    assert e.split_ops_points(0.900, 0) == 0
+
+def test_split_points_garbage_is_zero():
+    assert e.split_ops_points("x", e.SPLIT_MIN_PA) == 0
+
+
+# ------------------------------------------------------------
+# bvp_bonus_points — batter vs pitcher, sample-gated
+# ------------------------------------------------------------
+def test_bvp_full_sample_tiers():
+    assert e.bvp_bonus_points(0.360, e.BVP_MIN_PA) == e.WEIGHT_BVP
+    assert e.bvp_bonus_points(0.300, e.BVP_MIN_PA) == e.WEIGHT_BVP * 0.5
+    assert e.bvp_bonus_points(0.200, e.BVP_MIN_PA) == 0
+
+def test_bvp_small_sample_is_shrunk():
+    full = e.bvp_bonus_points(0.360, e.BVP_MIN_PA)
+    tiny = e.bvp_bonus_points(0.360, 2)
+    assert 0 <= tiny < full
+
+def test_bvp_zero_pa_is_zero():
+    assert e.bvp_bonus_points(0.500, 0) == 0
+
+def test_bvp_garbage_is_zero():
+    assert e.bvp_bonus_points("x", e.BVP_MIN_PA) == 0
+
+
+# ------------------------------------------------------------
 # calculate_fip
 # ------------------------------------------------------------
 def test_fip_uses_api_value_when_present():

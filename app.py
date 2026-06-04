@@ -1138,25 +1138,30 @@ if data and data.get('totalGames', 0) > 0:
                     try:    iso_val = float(adv_hit.get('iso', 0.140) or 0.140)
                     except Exception: iso_val = 0.140
 
-                    split_ops = 0.0
+                    split_ops, split_pa = 0.0, 0
                     sp_data   = get_season_stats(p_id, "hitting", current_year, split=split_code)
                     try:
-                        split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                        _sp = sp_data['stats'][0]['splits'][0]['stat']
+                        split_ops = float(_sp.get('ops', 0))
+                        split_pa  = int(_sp.get('plateAppearances', 0) or 0)
                     except Exception:
                         try:
                             c_data    = get_career_splits(p_id, "hitting", split_code)
-                            split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
+                            _sp = c_data['stats'][0]['splits'][0]['stat']
+                            split_ops = float(_sp.get('ops', 0))
+                            split_pa  = int(_sp.get('plateAppearances', 0) or 0)
                         except Exception:
                             pass
 
-                    bvp_avg, bvp_bonus = 0.0, 0
+                    bvp_avg, bvp_pa = 0.0, 0
                     bvp = get_bvp_stats(p_id, opp_pitcher_id)
                     if bvp:
-                        bvp_avg   = float(bvp.get('avg', 0))
-                        bvp_bonus = 10 if bvp_avg >= .350 else (5 if bvp_avg >= .250 else 0)
+                        bvp_avg = float(bvp.get('avg', 0) or 0)
+                        bvp_pa  = int(bvp.get('plateAppearances', bvp.get('atBats', 0)) or 0)
 
-                    # --- Scoring (ADDITIVE engine — unchanged except scaled BABIP) ---
-                    split_score = int(min(WEIGHT_SPLIT,      max(0, (split_ops - 0.500) * 50)))
+                    # --- Scoring (ADDITIVE engine; BvP & splits are sample-gated) ---
+                    split_score = split_ops_points(split_ops, split_pa)   # shrinks below SPLIT_MIN_PA
+                    bvp_bonus   = bvp_bonus_points(bvp_avg, bvp_pa)        # shrinks below BVP_MIN_PA
                     cons_score  = int((hit_games / 10.0) * WEIGHT_CONSISTENCY) if l10_total > 0 else 0
                     hrr_score   = int(min(WEIGHT_HRR, (l10_hrr_avg / 2.5) * WEIGHT_HRR))
                     penalty     = scaled_babip_penalty(babip)  # scaled, -1/.010 over .340, cap -20
@@ -1189,10 +1194,10 @@ if data and data.get('totalGames', 0) > 0:
                         receipt = {
                             f"Consistency Score (L10 hit rate)":       cons_score,
                             f"HRR Score (L10 avg HRR)":                hrr_score,
-                            f"Split OPS vs {split_label}":             split_score,
+                            f"Split OPS vs {split_label} ({split_pa} PA)": split_score,
                             f"Pitcher ERA Bonus":                      pitcher_score,
                             f"Lineup Position Bonus":                  lineup_score,
-                            f"BvP History":                            bvp_bonus,
+                            f"BvP History ({bvp_pa} PA)":              bvp_bonus,
                             f"BABIP Guardrail (scaled)":               penalty,
                         }
 
