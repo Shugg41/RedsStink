@@ -456,7 +456,10 @@ def get_league_hitting(year):
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
-    return http_get(url).json()
+    try:
+        return http_get(url).json()
+    except Exception:
+        return {}  # bad/non-JSON response -> app degrades to the OFF DAY screen
 
 @st.cache_data(ttl=300)
 def get_game_starters(game_pk):
@@ -493,7 +496,10 @@ def get_live_feed(game_pk):
 @st.cache_data(ttl=86400)
 def get_roster(team_id):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
-    return http_get(url).json().get('roster', [])
+    try:
+        return http_get(url).json().get('roster', [])
+    except Exception:
+        return []
 
 @st.cache_data(ttl=3600)
 def get_season_stats(player_id, group, year, split=None):
@@ -501,7 +507,10 @@ def get_season_stats(player_id, group, year, split=None):
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group={group}&season={year}&sitCodes={split}"
     else:
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group={group}&season={year}"
-    return http_get(url).json()
+    try:
+        return http_get(url).json()
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=3600)
 def get_advanced_hitting(player_id, year):
@@ -552,7 +561,10 @@ def get_bullpen_fatigue(team_id):
 @st.cache_data(ttl=86400)
 def get_career_splits(player_id, group, split_code):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCodes={split_code}"
-    return http_get(url).json()
+    try:
+        return http_get(url).json()
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=3600)
 def get_team_splits(team_id, year, split_code):
