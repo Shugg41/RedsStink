@@ -2,12 +2,22 @@ import streamlit as st
 import requests
 import pandas as pd
 import html
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import dateutil.parser
 
 # Pure scoring / odds / stat math (no Streamlit) — also used by tests & backtest
 from engine import *  # noqa: F401,F403
+
+# Streamlit ScriptRunContext lets cached fetchers run inside worker threads
+# without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
+# the internal API moves between Streamlit versions.
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+except Exception:  # pragma: no cover
+    add_script_run_ctx = get_script_run_ctx = None
 
 # ============================================================
 # TIME / HTTP HELPERS
@@ -757,6 +767,42 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     return projected_k, receipt
 
 # ============================================================
+# PARALLEL HITTER PREFETCH
+# ============================================================
+def _prefetch_hitter(p_id, year, split_code, opp_pitcher_id):
+    """Pull every API blob one hitter needs in a single call so the whole
+    roster can be fetched concurrently. All callees are @st.cache_data, so a
+    warm cache short-circuits the network."""
+    return {
+        'logs':    get_game_logs(p_id, year),
+        'ov_data': get_season_stats(p_id, "hitting", year),
+        'adv_hit': get_advanced_hitting(p_id, year),
+        'sp_data': get_season_stats(p_id, "hitting", year, split=split_code),
+        'bvp':     get_bvp_stats(p_id, opp_pitcher_id),
+    }
+
+def _parallel_prefetch(player_ids, year, split_code, opp_pitcher_id, max_workers=8):
+    """Fetch every hitter's stats in parallel. Returns {player_id: blob|None}.
+    Replaces ~6 sequential network calls per hitter with a concurrent sweep."""
+    if not player_ids:
+        return {}
+    ctx = get_script_run_ctx() if get_script_run_ctx else None
+
+    def task(pid):
+        if ctx and add_script_run_ctx:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        try:
+            return pid, _prefetch_hitter(pid, year, split_code, opp_pitcher_id)
+        except Exception:
+            return pid, None
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(player_ids))) as ex:
+        for pid, blob in ex.map(task, player_ids):
+            out[pid] = blob
+    return out
+
+# ============================================================
 # PLAYER CARD HTML
 # ============================================================
 def render_player_card(row, split_label, idx):
@@ -1090,7 +1136,6 @@ if data and data.get('totalGames', 0) > 0:
                 # refresh local handle after potential auto-fetch
                 live_odds = st.session_state['dk_odds'] if st.session_state.get('dk_odds_date') == date_str else {}
 
-                pb           = st.progress(0, text="Evaluating roster...")
                 scan_results = []
                 league_stats = get_league_hitting(current_year)
 
@@ -1100,20 +1145,34 @@ if data and data.get('totalGames', 0) > 0:
                     try:    opp_fip_val = float(calculate_fip(adv_stats))
                     except Exception: opp_fip_val = 4.00
 
-                for i, (name, p_id) in enumerate(hitters.items()):
-                    pb.progress((i + 1) / len(hitters), text=f"Analyzing {name}...")
+                # Decide who we actually score (respect "hide bench"), then fetch
+                # all of their stats concurrently instead of one hitter at a time.
+                to_score = []
+                for name, p_id in hitters.items():
+                    if reds_batting_order and show_starters and p_id not in reds_batting_order:
+                        continue
+                    to_score.append((name, p_id))
+
+                with st.spinner(f"Fetching stats for {len(to_score)} hitters in parallel..."):
+                    prefetched = _parallel_prefetch(
+                        [pid for _, pid in to_score], current_year, split_code, opp_pitcher_id
+                    )
+
+                pb = st.progress(0, text="Scoring roster...")
+                n_score = max(1, len(to_score))
+                for i, (name, p_id) in enumerate(to_score):
+                    pb.progress((i + 1) / n_score, text=f"Scoring {name}...")
                     lineup_score, in_lineup, idx_pos = 0, False, None
-                    if reds_batting_order:
-                        if p_id in reds_batting_order:
-                            in_lineup    = True
-                            idx_pos      = reds_batting_order.index(p_id)
-                            lineup_score = LINEUP_TOP_BONUS if idx_pos <= 2 else (LINEUP_BOT_PENALTY if idx_pos >= 6 else 0)
-                        if show_starters and not in_lineup:
-                            continue
+                    if reds_batting_order and p_id in reds_batting_order:
+                        in_lineup    = True
+                        idx_pos      = reds_batting_order.index(p_id)
+                        lineup_score = LINEUP_TOP_BONUS if idx_pos <= 2 else (LINEUP_BOT_PENALTY if idx_pos >= 6 else 0)
+
+                    blob = prefetched.get(p_id) or {}
 
                     # L10 form
                     hit_games, l10_total, l10_h_avg, l10_hrr_avg = 0, 0, 0.0, 0.0
-                    logs = get_game_logs(p_id, current_year)
+                    logs = blob.get('logs') or []
                     if logs:
                         l10       = logs[-10:]
                         l10_total = len(l10)
@@ -1124,8 +1183,8 @@ if data and data.get('totalGames', 0) > 0:
 
                     overall_avg, ops_plus, babip = ".000", "N/A", ".000"
                     k_pct_val, iso_val = 0.22, 0.140
-                    ov_data  = get_season_stats(p_id, "hitting", current_year)
-                    adv_hit  = get_advanced_hitting(p_id, current_year)
+                    ov_data  = blob.get('ov_data') or {}
+                    adv_hit  = blob.get('adv_hit') or {}
                     try:
                         psb        = ov_data['stats'][0]['splits'][0]['stat']
                         overall_avg = psb.get('avg', '.000')
@@ -1139,7 +1198,7 @@ if data and data.get('totalGames', 0) > 0:
                     except Exception: iso_val = 0.140
 
                     split_ops, split_pa = 0.0, 0
-                    sp_data   = get_season_stats(p_id, "hitting", current_year, split=split_code)
+                    sp_data   = blob.get('sp_data') or {}
                     try:
                         _sp = sp_data['stats'][0]['splits'][0]['stat']
                         split_ops = float(_sp.get('ops', 0))
@@ -1154,7 +1213,7 @@ if data and data.get('totalGames', 0) > 0:
                             pass
 
                     bvp_avg, bvp_pa = 0.0, 0
-                    bvp = get_bvp_stats(p_id, opp_pitcher_id)
+                    bvp = blob.get('bvp')
                     if bvp:
                         bvp_avg = float(bvp.get('avg', 0) or 0)
                         bvp_pa  = int(bvp.get('plateAppearances', bvp.get('atBats', 0)) or 0)
