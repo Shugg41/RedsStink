@@ -1,9 +1,32 @@
 import streamlit as st
 import requests
 import pandas as pd
-import statistics
+import html
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import dateutil.parser
+
+# ============================================================
+# TIME / HTTP HELPERS
+# ============================================================
+EASTERN = ZoneInfo("America/New_York")
+HTTP_TIMEOUT = 10  # seconds — guard against hung MLB/Supabase/Odds calls
+
+def now_eastern():
+    """Current time in US Eastern (handles EST/EDT automatically)."""
+    return datetime.now(EASTERN)
+
+def http_get(url, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return requests.get(url, **kwargs)
+
+def http_post(url, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return requests.post(url, **kwargs)
+
+def http_patch(url, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return requests.patch(url, **kwargs)
 
 # ============================================================
 # PAGE CONFIG
@@ -232,7 +255,6 @@ WEIGHT_PITCHER       = 10   # Max pts: opponent ERA bonus
 WEIGHT_BVP           = 10   # Max pts: batter vs pitcher history
 LINEUP_TOP_BONUS     =  5   # Batting 1-3 bonus
 LINEUP_BOT_PENALTY   = -5   # Batting 7-9 penalty
-BABIP_PENALTY        = -8   # (legacy flat penalty — no longer used; see scaled version)
 TIER1_THRESHOLD      = 75
 TIER2_THRESHOLD      = 55
 
@@ -240,6 +262,12 @@ TIER2_THRESHOLD      = 55
 BABIP_THRESHOLD      = 0.340  # regression watch line
 BABIP_PER_010        = 1.0    # additive: -1 pt per .010 above threshold
 BABIP_ADD_CAP        = -20    # additive penalty floor
+
+# Park factors — shared by the strikeout and multiplicative engines
+HITTER_PARKS  = ['Great American Ball Park', 'Coors Field', 'Fenway Park', 'Globe Life Field',
+                 'American Family Field', 'Guaranteed Rate Field']
+PITCHER_PARKS = ['T-Mobile Park', 'loanDepot park', 'Oracle Park', 'Petco Park',
+                 'Kauffman Stadium', 'Truist Park']
 
 # ============================================================
 # MULTIPLICATIVE ENGINE CONFIG (side-by-side experiment)
@@ -281,14 +309,14 @@ try:
     # Upsert variant: merge duplicates on conflict instead of erroring
     DB_HEADERS_UPSERT = dict(DB_HEADERS)
     DB_HEADERS_UPSERT["Prefer"] = "resolution=merge-duplicates,return=representation"
-except:
+except Exception:
     SUPABASE_URL = None
     DB_HEADERS = None
     DB_HEADERS_UPSERT = None
 
 try:
     ODDS_API_KEY = st.secrets["ODDS_API_KEY"]
-except:
+except Exception:
     ODDS_API_KEY = None
 
 # ============================================================
@@ -311,7 +339,7 @@ def calc_ip(ip_str):
             whole, partial = ip.split('.')
             return int(whole) + (int(partial) / 3.0)
         return int(ip)
-    except:
+    except Exception:
         return 0.0
 
 def calculate_fip(stats):
@@ -327,7 +355,7 @@ def calculate_fip(stats):
         if ip <= 0: return "0.00"
         fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.20
         return f"{max(0, fip):.2f}"
-    except:
+    except Exception:
         return "0.00"
 
 def normalize_name(name):
@@ -351,20 +379,8 @@ def american_to_decimal(price):
         elif price < 0:
             return 1.0 + (100.0 / abs(price))
         return 1.0
-    except:
+    except Exception:
         return 1.0
-
-def american_to_implied_prob(price):
-    """Convert American odds to implied win probability (0-1), vig included."""
-    try:
-        price = float(price)
-        if price > 0:
-            return 100.0 / (price + 100.0)
-        elif price < 0:
-            return abs(price) / (abs(price) + 100.0)
-        return 0.0
-    except:
-        return 0.0
 
 def units_won(price, won):
     """Units won/lost on a 1-unit bet given American price and W/L (1/0)."""
@@ -379,7 +395,7 @@ def units_won(price, won):
 def auto_grade_past_predictions():
     if not SUPABASE_URL:
         return
-    now = datetime.now()
+    now = now_eastern()
     last = st.session_state.get('last_autograde_time')
     if last and (now - last).total_seconds() < 1800:
         return
@@ -390,15 +406,15 @@ def auto_grade_past_predictions():
     dates_to_grade = set()
     for endpoint in ["predictions", "pitcher_predictions"]:
         try:
-            res = requests.get(f"{SUPABASE_URL}/rest/v1/{endpoint}?graded=eq.0&select=date", headers=DB_HEADERS)
+            res = http_get(f"{SUPABASE_URL}/rest/v1/{endpoint}?graded=eq.0&select=date", headers=DB_HEADERS)
             if res.status_code == 200 and isinstance(res.json(), list):
                 dates_to_grade.update([r['date'] for r in res.json()])
-        except:
+        except Exception:
             pass
 
     for d in dates_to_grade:
         try:
-            sched_res = requests.get(f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}")
+            sched_res = http_get(f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}")
             if sched_res.status_code != 200:
                 continue
             sched = sched_res.json()
@@ -414,16 +430,16 @@ def auto_grade_past_predictions():
                 _grade_final_games(final_games, d, today_str)
             elif all_postponed or (d < today_str and not any(g['status']['statusCode'] in ['I', 'S', 'D', 'DI'] for g in games)):
                 _mark_no_game(d)
-        except:
+        except Exception:
             pass
 
 def _mark_no_game(d):
     try:
-        requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
+        http_patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
                        json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-        requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0",
+        http_patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0",
                        json={"actual_ks": 0, "graded": -1}, headers=DB_HEADERS)
-    except:
+    except Exception:
         pass
 
 def _grade_final_games(final_games, d, today_str):
@@ -434,7 +450,7 @@ def _grade_final_games(final_games, d, today_str):
     for game in final_games:
         gpk = game.get('gamePk')
         try:
-            feed = requests.get(f"https://statsapi.mlb.com/api/v1.1/game/{game['gamePk']}/feed/live").json()
+            feed = http_get(f"https://statsapi.mlb.com/api/v1.1/game/{game['gamePk']}/feed/live").json()
             box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
             players = {**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})}
             if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
@@ -444,7 +460,7 @@ def _grade_final_games(final_games, d, today_str):
             per_game[gpk] = (players, batters)
             pooled_players.update(players)
             pooled_batters.extend(batters)
-        except:
+        except Exception:
             pass
 
     def _grade_hit_row(p_row, players_dict):
@@ -460,11 +476,11 @@ def _grade_final_games(final_games, d, today_str):
 
     # ---- Grade hitting predictions, per game_pk ----
     try:
-        preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
+        preds_res = http_get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
         if preds_res.status_code == 200 and preds_res.json():
             rows = preds_res.json()
             # default everything to no-result first (win=-1); real results overwrite
-            requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
+            http_patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
                            json={"graded": 1, "win": -1}, headers=DB_HEADERS)
             for p_row in rows:
                 gpk = p_row.get('game_pk')
@@ -479,14 +495,14 @@ def _grade_final_games(final_games, d, today_str):
                     q = f"date=eq.{d}&player_id=eq.{p_row['player_id']}"
                     if gpk is not None:
                         q += f"&game_pk=eq.{gpk}"
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/predictions?{q}",
+                    http_patch(f"{SUPABASE_URL}/rest/v1/predictions?{q}",
                                    json=patch, headers=DB_HEADERS)
-    except:
+    except Exception:
         pass
 
     # ---- Grade pitcher predictions (strikeouts), per game_pk ----
     try:
-        p_preds_res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
+        p_preds_res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
         if p_preds_res.status_code == 200 and p_preds_res.json():
             for p_pred in p_preds_res.json():
                 if p_pred.get('projected_ks') is None:
@@ -502,9 +518,9 @@ def _grade_final_games(final_games, d, today_str):
                 q = f"player_id=eq.{p_id}&date=eq.{d}"
                 if gpk is not None:
                     q += f"&game_pk=eq.{gpk}"
-                requests.patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?{q}",
+                http_patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?{q}",
                                json={"actual_ks": k_actual, "graded": 1}, headers=DB_HEADERS)
-    except:
+    except Exception:
         pass
 
 # ============================================================
@@ -514,8 +530,8 @@ def _grade_final_games(final_games, d, today_str):
 def get_league_hitting(year):
     url = f"https://statsapi.mlb.com/api/v1/sports/1/stats?stats=season&group=hitting&season={year}"
     try:
-        return requests.get(url).json()['stats'][0]['splits'][0]['stat']
-    except:
+        return http_get(url).json()['stats'][0]['splits'][0]['stat']
+    except Exception:
         return {'obp': '.315', 'slg': '.400'}
 
 def calculate_ops_plus(player_stats, league_stats):
@@ -527,19 +543,19 @@ def calculate_ops_plus(player_stats, league_stats):
         lg_slg = float(league_stats.get('slg', '.400'))
         if lg_obp <= 0 or lg_slg <= 0: return "N/A"
         return str(max(0, int(round(100 * ((p_obp / lg_obp) + (p_slg / lg_slg) - 1)))))
-    except:
+    except Exception:
         return "N/A"
 
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
-    return requests.get(url).json()
+    return http_get(url).json()
 
 @st.cache_data(ttl=300)
 def get_game_starters(game_pk):
     url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
     try:
-        res = requests.get(url).json()
+        res = http_get(url).json()
         starters = {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
         probables = res.get('gameData', {}).get('probablePitchers', {})
         for side in ('away', 'home'):
@@ -555,13 +571,22 @@ def get_game_starters(game_pk):
                     if player:
                         starters[side] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
         return starters
-    except:
+    except Exception:
         return {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
+
+@st.cache_data(ttl=300)
+def get_live_feed(game_pk):
+    """Cached game feed/live pull (used for lineups). Short TTL keeps it fresh
+    without re-fetching on every Streamlit rerun."""
+    try:
+        return http_get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live").json()
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=86400)
 def get_roster(team_id):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
-    return requests.get(url).json().get('roster', [])
+    return http_get(url).json().get('roster', [])
 
 @st.cache_data(ttl=3600)
 def get_season_stats(player_id, group, year, split=None):
@@ -569,31 +594,31 @@ def get_season_stats(player_id, group, year, split=None):
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group={group}&season={year}&sitCodes={split}"
     else:
         url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group={group}&season={year}"
-    return requests.get(url).json()
+    return http_get(url).json()
 
 @st.cache_data(ttl=3600)
 def get_advanced_hitting(player_id, year):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=hitting&season={year}"
-    res = requests.get(url).json()
+    res = http_get(url).json()
     stats = {}
     try:
         for split in res.get('stats', []):
             if split['type']['displayName'] in ['season', 'seasonAdvanced']:
                 stats.update(split['splits'][0]['stat'])
-    except:
+    except Exception:
         pass
     return stats
 
 @st.cache_data(ttl=3600)
 def get_advanced_pitching(player_id, year):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=pitching&season={year}"
-    res = requests.get(url).json()
+    res = http_get(url).json()
     stats = {}
     try:
         for split in res.get('stats', []):
             if split['type']['displayName'] in ['season', 'seasonAdvanced']:
                 stats.update(split['splits'][0]['stat'])
-    except:
+    except Exception:
         pass
     return stats
 
@@ -601,33 +626,33 @@ def get_advanced_pitching(player_id, year):
 def get_team_pitching(team_id, year):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=pitching&season={year}&sitCodes=rp"
     try:
-        return requests.get(url).json()['stats'][0]['splits'][0]['stat']
-    except:
+        return http_get(url).json()['stats'][0]['splits'][0]['stat']
+    except Exception:
         return {}
 
 @st.cache_data(ttl=3600)
 def get_bullpen_fatigue(team_id):
-    today = datetime.now()
+    today = now_eastern()
     start = (today - timedelta(days=3)).strftime("%Y-%m-%d")
     end   = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     url   = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=byDateRange&group=pitching&startDate={start}&endDate={end}&sitCodes=rp"
     try:
-        res = requests.get(url).json()
+        res = http_get(url).json()
         return calc_ip(res['stats'][0]['splits'][0]['stat'].get('inningsPitched', '0.0'))
-    except:
+    except Exception:
         return 0.0
 
 @st.cache_data(ttl=86400)
 def get_career_splits(player_id, group, split_code):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCodes={split_code}"
-    return requests.get(url).json()
+    return http_get(url).json()
 
 @st.cache_data(ttl=3600)
 def get_team_splits(team_id, year, split_code):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=hitting&season={year}&sitCodes={split_code}"
     try:
-        return requests.get(url).json()['stats'][0]['splits'][0]['stat']
-    except:
+        return http_get(url).json()['stats'][0]['splits'][0]['stat']
+    except Exception:
         return {}
 
 @st.cache_data(ttl=3600)
@@ -635,24 +660,24 @@ def get_bvp_stats(batter_id, pitcher_id):
     if not pitcher_id: return None
     url = f"https://statsapi.mlb.com/api/v1/people/{batter_id}/stats?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting"
     try:
-        return requests.get(url).json()['stats'][0]['splits'][0]['stat']
-    except:
+        return http_get(url).json()['stats'][0]['splits'][0]['stat']
+    except Exception:
         return None
 
 @st.cache_data(ttl=3600)
 def get_game_logs(player_id, year, group="hitting"):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group={group}&season={year}"
     try:
-        return requests.get(url).json()['stats'][0]['splits']
-    except:
+        return http_get(url).json()['stats'][0]['splits']
+    except Exception:
         return []
 
 @st.cache_data(ttl=86400)
 def get_pitcher_hand(pitcher_id):
     if not pitcher_id: return "R"
     try:
-        return requests.get(f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}").json()['people'][0]['pitchHand']['code']
-    except:
+        return http_get(f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}").json()['people'][0]['pitchHand']['code']
+    except Exception:
         return "R"
 
 @st.cache_data(ttl=3600)
@@ -684,7 +709,7 @@ def get_draftkings_odds():
     base = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
     try:
         # --- Step 1: list events (cheap, no markets) ---
-        ev_res = requests.get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
+        ev_res = http_get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
         if ev_res.status_code != 200:
             st.error(f"Odds API (events) failed: {ev_res.text[:200]}")
             return {}
@@ -707,7 +732,7 @@ def get_draftkings_odds():
             return {}
 
         # --- Step 2: pull batter_hits for the Reds event (1 credit) ---
-        o_res = requests.get(
+        o_res = http_get(
             f"{base}/events/{reds_event_id}/odds",
             params={
                 "apiKey": ODDS_API_KEY,
@@ -753,7 +778,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     # --- BASE: K/9 projection ---
     try:
         k9 = float(adv.get('strikeoutsPer9Inn', adv.get('k9', '7.5')))
-    except:
+    except Exception:
         k9 = 7.5
     base_ks = round((k9 / 9.0) * l5_avg_ip, 1) if l5_avg_ip > 0 else round(k9 / 9.0 * 5.5, 1)
     receipt.append(("Base K Projection (K/9 × Avg IP)", base_ks, f"K/9: {k9:.1f}, Avg IP L5: {l5_avg_ip}"))
@@ -778,7 +803,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
         else:               swstr_adj = 0.0
         if bb_pct > 0.12:   swstr_adj -= 0.25
         receipt.append(("K% / Swing-Miss Profile", round(swstr_adj, 2), f"K%: {k_pct*100:.1f}%, BB%: {bb_pct*100:.1f}%"))
-    except:
+    except Exception:
         swstr_adj = 0.0
         receipt.append(("K% / Swing-Miss Profile", 0.0, "Unavailable"))
 
@@ -797,7 +822,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
         else:                    opp_k_adj = 0.0
         receipt.append((f"{opp_team_name} K% vs {split_label}", round(opp_k_adj, 2),
                          f"{opp_k_pct*100:.1f}% K rate"))
-    except:
+    except Exception:
         opp_k_adj = 0.0
         receipt.append((f"{opp_team_name} K% vs {split_label}", 0.0, "Unavailable"))
 
@@ -806,7 +831,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
         opp_ppa = float(opp_splits.get('pitchesPerPlateAppearance', '3.85'))
         ppa_adj = -0.4 if opp_ppa > 4.1 else (-0.2 if opp_ppa > 3.95 else (0.3 if opp_ppa < 3.70 else 0.0))
         receipt.append((f"{opp_team_name} P/PA", round(ppa_adj, 2), f"{opp_ppa:.2f} pitches/PA"))
-    except:
+    except Exception:
         ppa_adj = 0.0
         receipt.append((f"{opp_team_name} P/PA", 0.0, "Unavailable"))
 
@@ -815,18 +840,14 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
         whip = float(adv.get('whip', '1.25'))
         whip_adj = -SK_WHIP_ADJ if whip > 1.45 else (-0.25 if whip > 1.30 else (SK_WHIP_ADJ if whip < 1.10 else 0.0))
         receipt.append(("Command / WHIP", round(whip_adj, 2), f"WHIP: {whip:.2f}"))
-    except:
+    except Exception:
         whip_adj = 0.0
         receipt.append(("Command / WHIP", 0.0, "Unavailable"))
 
     # --- Park factor ---
-    hitter_parks  = ['Great American Ball Park', 'Coors Field', 'Fenway Park', 'Globe Life Field',
-                     'American Family Field', 'Guaranteed Rate Field']
-    pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park', 'Petco Park',
-                     'Kauffman Stadium', 'Truist Park']
-    if park_name in hitter_parks:
+    if park_name in HITTER_PARKS:
         park_k_adj = -SK_PARK_K_ADJ
-    elif park_name in pitcher_parks:
+    elif park_name in PITCHER_PARKS:
         park_k_adj = SK_PARK_K_ADJ
     else:
         park_k_adj = 0.0
@@ -845,7 +866,7 @@ def scaled_babip_penalty(babip_str):
     """-1 pt per .010 of BABIP above .340, floored at BABIP_ADD_CAP (-20)."""
     try:
         b = float(babip_str)
-    except:
+    except Exception:
         return 0
     if b <= BABIP_THRESHOLD:
         return 0
@@ -874,27 +895,27 @@ def run_multiplicative_engine(inputs):
     # Season quality from OPS+ (100 = league avg -> ~60 baseline pts), ISO nudges.
     try:
         opsp = float(inputs.get('ops_plus')) if inputs.get('ops_plus') not in (None, "N/A") else 100.0
-    except:
+    except Exception:
         opsp = 100.0
     # Map OPS+ ~ [60,160] -> [30,90]; 100 -> 60
     season_sub = max(0, min(100, 60 + (opsp - 100) * 0.5))
     try:
         iso = float(inputs.get('iso', 0) or 0)
         season_sub = min(100, season_sub + (iso - 0.140) * 40)  # ISO above .140 nudges up
-    except:
+    except Exception:
         pass
 
     # Contact floor from K%: 12% -> ~85, 22% -> ~60, 32% -> ~35
     try:
         kp = float(inputs.get('k_pct', 0.22) or 0.22)
-    except:
+    except Exception:
         kp = 0.22
     contact_sub = max(0, min(100, 60 + (0.22 - kp) * 250))
 
     # Recent involvement from L10 hit-game rate (0-1)
     try:
         rate = float(inputs.get('l10_hit_rate', 0.0) or 0.0)
-    except:
+    except Exception:
         rate = 0.0
     recent_sub = max(0, min(100, rate * 100))
 
@@ -908,24 +929,20 @@ def run_multiplicative_engine(inputs):
     # ---- MATCHUP MODIFIER: starter FIP + park ----
     try:
         fip = float(inputs.get('opp_fip', 4.00) or 4.00)
-    except:
+    except Exception:
         fip = 4.00
     # Lower FIP (better pitcher) -> modifier below 1.0. 4.00 neutral.
     fip_mod = 1.0 + (fip - 4.00) * 0.06  # each run of FIP = 6% swing
     park = inputs.get('park_name', '')
-    hitter_parks  = ['Great American Ball Park', 'Coors Field', 'Fenway Park', 'Globe Life Field',
-                     'American Family Field', 'Guaranteed Rate Field']
-    pitcher_parks = ['T-Mobile Park', 'loanDepot park', 'Oracle Park', 'Petco Park',
-                     'Kauffman Stadium', 'Truist Park']
-    park_mod = 1.05 if park in hitter_parks else (0.95 if park in pitcher_parks else 1.0)
+    park_mod = 1.05 if park in HITTER_PARKS else (0.95 if park in PITCHER_PARKS else 1.0)
     matchup_mod = _clamp_mod(fip_mod * park_mod)
     receipt.append(("Matchup (FIP × park)", round(matchup_mod, 3),
-                    f"opp FIP {fip:.2f}, park {'hitter' if park in hitter_parks else ('pitcher' if park in pitcher_parks else 'neutral')}"))
+                    f"opp FIP {fip:.2f}, park {'hitter' if park in HITTER_PARKS else ('pitcher' if park in PITCHER_PARKS else 'neutral')}"))
 
     # ---- LUCK MODIFIER: BABIP regression ----
     try:
         b = float(inputs.get('babip', 0) or 0)
-    except:
+    except Exception:
         b = 0.0
     if b > BABIP_THRESHOLD:
         luck_mod = _clamp_mod(1.0 - (b - BABIP_THRESHOLD) * 2.0)  # .420 -> ~0.84
@@ -1013,7 +1030,7 @@ def render_player_card(row, split_label, idx):
             <div style="display:flex; align-items:center; gap:12px;">
                 <span class="player-score">{row['Score']}</span>
                 <div>
-                    <p class="player-name">#{idx} {row['Player']} {mult_chip}{disagree_flag}</p>
+                    <p class="player-name">#{idx} {html.escape(str(row['Player']))} {mult_chip}{disagree_flag}</p>
                     <span class="tier-badge {badge_cls}">{badge_text}</span>
                 </div>
             </div>
@@ -1058,7 +1075,6 @@ def render_receipt(row):
             </div>"""
 
         # Multiplicative breakdown (baseline × modifiers)
-        mult_receipt = row.get('Mult_Receipt', [])
         if mult_receipt:
             lines_html += '<div style="margin-top:14px;border-top:1px solid #333;padding-top:8px;"></div>'
             lines_html += '<div class="receipt-line" style="color:#7fb3ff;font-weight:700;"><span>MULTIPLICATIVE ENGINE</span><span></span></div>'
@@ -1085,6 +1101,41 @@ def render_receipt(row):
         st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{lines_html}</div>',
                     unsafe_allow_html=True)
 
+def render_strikeout_panel(pitcher_id, pitcher_name, proj_k, receipt, year):
+    """Render the projected-Ks number, the engine receipt, and the L5 starts
+    table for one pitcher. Shared by both the Reds and opponent columns."""
+    st.markdown(f'<div class="k-label">PROJECTED STRIKEOUTS</div><div class="k-proj">{proj_k}</div>',
+                unsafe_allow_html=True)
+    st.divider()
+    st.markdown(f"#### 🧾 Engine Receipt: {pitcher_name}")
+    receipt_html = ""
+    for label, val, detail in receipt:
+        css = color_val(val)
+        receipt_html += f"""
+        <div class="receipt-line">
+            <span>{label} <small style="color:#555;">({detail})</small></span>
+            <span class="{css}">{signed(val)}</span>
+        </div>"""
+    receipt_html += f"""
+    <div class="receipt-total">
+        <span>PROJECTED Ks</span>
+        <span>{proj_k}</span>
+    </div>"""
+    st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{receipt_html}</div>',
+                unsafe_allow_html=True)
+
+    st.markdown("#### 📋 Last 5 Starts")
+    p_logs = get_game_logs(pitcher_id, year, group="pitching")
+    if p_logs:
+        log_data = [{
+            "Date": g.get('date', ''),
+            "Opp":  g.get('opponent', {}).get('name', ''),
+            "IP":   g.get('stat', {}).get('inningsPitched', '0.0'),
+            "K":    g.get('stat', {}).get('strikeOuts', 0),
+            "Pitches": g.get('stat', {}).get('numberOfPitches', 0),
+        } for g in reversed(p_logs[-5:])]
+        st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
+
 # ============================================================
 # EXECUTE AUTO-GRADER
 # ============================================================
@@ -1096,7 +1147,7 @@ auto_grade_past_predictions()
 with st.sidebar:
     st.image("https://a.espncdn.com/i/teamlogos/mlb/500/cin.png", width=100)
     st.title("Settings")
-    selected_date = st.date_input("Select Game Date", datetime.now())
+    selected_date = st.date_input("Select Game Date", now_eastern())
     date_str      = selected_date.strftime("%Y-%m-%d")
     current_year  = selected_date.year
 
@@ -1137,9 +1188,9 @@ if data and data.get('totalGames', 0) > 0:
     if raw_time:
         try:
             utc_time       = dateutil.parser.isoparse(raw_time)
-            est_time       = utc_time - timedelta(hours=4)
-            start_time_est = est_time.strftime("%I:%M %p EST")
-        except:
+            est_time       = utc_time.astimezone(EASTERN)
+            start_time_est = est_time.strftime("%I:%M %p %Z")
+        except Exception:
             pass
 
     game_status = game['status']['statusCode']
@@ -1184,10 +1235,10 @@ if data and data.get('totalGames', 0) > 0:
 
     # --- Batting order ---
     try:
-        live_feed = requests.get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live").json()
+        live_feed = get_live_feed(game_pk)
         boxscore  = live_feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
         reds_batting_order = boxscore.get('away' if "Reds" in away_team else 'home', {}).get('battingOrder', [])
-    except:
+    except Exception:
         reds_batting_order = []
 
     # ============================================================
@@ -1275,9 +1326,15 @@ if data and data.get('totalGames', 0) > 0:
                 scan_results = []
                 league_stats = get_league_hitting(current_year)
 
+                # Opposing starter's FIP is the same for every Reds hitter — compute once.
+                opp_fip_val = 4.00
+                if adv_stats:
+                    try:    opp_fip_val = float(calculate_fip(adv_stats))
+                    except Exception: opp_fip_val = 4.00
+
                 for i, (name, p_id) in enumerate(hitters.items()):
                     pb.progress((i + 1) / len(hitters), text=f"Analyzing {name}...")
-                    lineup_score, in_lineup = 0, False
+                    lineup_score, in_lineup, idx_pos = 0, False, None
                     if reds_batting_order:
                         if p_id in reds_batting_order:
                             in_lineup    = True
@@ -1306,22 +1363,22 @@ if data and data.get('totalGames', 0) > 0:
                         overall_avg = psb.get('avg', '.000')
                         ops_plus    = calculate_ops_plus(psb, league_stats)
                         babip       = adv_hit.get('babip', '.000')
-                    except:
+                    except Exception:
                         pass
                     try:    k_pct_val = float(adv_hit.get('strikeoutsPerPlateAppearance', 0.22) or 0.22)
-                    except: k_pct_val = 0.22
+                    except Exception: k_pct_val = 0.22
                     try:    iso_val = float(adv_hit.get('iso', 0.140) or 0.140)
-                    except: iso_val = 0.140
+                    except Exception: iso_val = 0.140
 
                     split_ops = 0.0
                     sp_data   = get_season_stats(p_id, "hitting", current_year, split=split_code)
                     try:
                         split_ops = float(sp_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                    except:
+                    except Exception:
                         try:
                             c_data    = get_career_splits(p_id, "hitting", split_code)
                             split_ops = float(c_data['stats'][0]['splits'][0]['stat'].get('ops', 0))
-                        except:
+                        except Exception:
                             pass
 
                     bvp_avg, bvp_bonus = 0.0, 0
@@ -1341,10 +1398,8 @@ if data and data.get('totalGames', 0) > 0:
                     tier        = "🟢 Tier 1" if total_score >= TIER1_THRESHOLD else ("🟡 Tier 2" if total_score >= TIER2_THRESHOLD else "🔴 Tier 3")
 
                     # --- MULTIPLICATIVE engine (side-by-side) ---
-                    lineup_pos_val = idx_pos if (reds_batting_order and p_id in reds_batting_order) else None
+                    lineup_pos_val = idx_pos
                     l10_hit_rate   = (hit_games / l10_total) if l10_total > 0 else 0.0
-                    try:    opp_fip_val = float(calculate_fip(adv_stats)) if adv_stats else 4.00
-                    except: opp_fip_val = 4.00
                     mult_score, mult_tier, mult_baseline, mult_receipt = run_multiplicative_engine({
                         'ops_plus': ops_plus, 'iso': iso_val, 'k_pct': k_pct_val,
                         'l10_hit_rate': l10_hit_rate, 'opp_fip': opp_fip_val,
@@ -1405,7 +1460,7 @@ if data and data.get('totalGames', 0) > 0:
                         } for r in scan_results]
                         # merge-duplicates upsert keyed on (date, player_id, game_pk)
                         # so doubleheaders (same date+player, different game) stay separate
-                        save_res = requests.post(
+                        save_res = http_post(
                             f"{SUPABASE_URL}/rest/v1/predictions?on_conflict=date,player_id,game_pk",
                             json=insert_data, headers=DB_HEADERS_UPSERT
                         )
@@ -1472,41 +1527,8 @@ if data and data.get('totalGames', 0) > 0:
                         reds_k_id, reds_k_pitcher, opp_team_id, opponent, park_name, current_year
                     )
                 if r_proj_k is not None:
-                    st.markdown(f'<div class="k-label">PROJECTED STRIKEOUTS</div><div class="k-proj">{r_proj_k}</div>', unsafe_allow_html=True)
-                    st.divider()
-                    st.markdown(f"#### 🧾 Engine Receipt: {reds_k_pitcher}")
-                    receipt_html = ""
-                    for label, val, detail in r_receipt:
-                        css = color_val(val)
-                        receipt_html += f"""
-                        <div class="receipt-line">
-                            <span>{label} <small style="color:#555;">({detail})</small></span>
-                            <span class="{css}">{signed(val)}</span>
-                        </div>"""
-                    receipt_html += f"""
-                    <div class="receipt-total">
-                        <span>PROJECTED Ks</span>
-                        <span>{r_proj_k}</span>
-                    </div>"""
-                    st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{receipt_html}</div>', unsafe_allow_html=True)
-
+                    render_strikeout_panel(reds_k_id, reds_k_pitcher, r_proj_k, r_receipt, current_year)
                     k_projections.append({"player_id": reds_k_id, "player_name": reds_k_pitcher, "projected_ks": r_proj_k})
-
-                    # L5 log
-                    st.markdown("#### 📋 Last 5 Starts")
-                    p_logs = get_game_logs(reds_k_id, current_year, group="pitching")
-                    if p_logs:
-                        log_data = []
-                        for g in reversed(p_logs[-5:]):
-                            s = g.get('stat', {})
-                            log_data.append({
-                                "Date": g.get('date', ''),
-                                "Opp":  g.get('opponent', {}).get('name', ''),
-                                "IP":   s.get('inningsPitched', '0.0'),
-                                "K":    s.get('strikeOuts', 0),
-                                "Pitches": s.get('numberOfPitches', 0)
-                            })
-                        st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
                 else:
                     st.info("No data available.")
 
@@ -1517,40 +1539,8 @@ if data and data.get('totalGames', 0) > 0:
                             opp_k_id, opp_k_name, 113, "Cincinnati Reds", park_name, current_year
                         )
                     if o_proj_k is not None:
-                        st.markdown(f'<div class="k-label">PROJECTED STRIKEOUTS</div><div class="k-proj">{o_proj_k}</div>', unsafe_allow_html=True)
-                        st.divider()
-                        st.markdown(f"#### 🧾 Engine Receipt: {opp_k_name}")
-                        receipt_html = ""
-                        for label, val, detail in o_receipt:
-                            css = color_val(val)
-                            receipt_html += f"""
-                            <div class="receipt-line">
-                                <span>{label} <small style="color:#555;">({detail})</small></span>
-                                <span class="{css}">{signed(val)}</span>
-                            </div>"""
-                        receipt_html += f"""
-                        <div class="receipt-total">
-                            <span>PROJECTED Ks</span>
-                            <span>{o_proj_k}</span>
-                        </div>"""
-                        st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{receipt_html}</div>', unsafe_allow_html=True)
-
+                        render_strikeout_panel(opp_k_id, opp_k_name, o_proj_k, o_receipt, current_year)
                         k_projections.append({"player_id": opp_k_id, "player_name": opp_k_name, "projected_ks": o_proj_k})
-
-                        st.markdown("#### 📋 Last 5 Starts")
-                        p_logs_opp = get_game_logs(opp_k_id, current_year, group="pitching")
-                        if p_logs_opp:
-                            log_data_opp = []
-                            for g in reversed(p_logs_opp[-5:]):
-                                s = g.get('stat', {})
-                                log_data_opp.append({
-                                    "Date": g.get('date', ''),
-                                    "Opp":  g.get('opponent', {}).get('name', ''),
-                                    "IP":   s.get('inningsPitched', '0.0'),
-                                    "K":    s.get('strikeOuts', 0),
-                                    "Pitches": s.get('numberOfPitches', 0)
-                                })
-                            st.dataframe(pd.DataFrame(log_data_opp), hide_index=True, use_container_width=True)
                 else:
                     st.info(f"Select {opponent} pitcher to run engine.")
 
@@ -1566,7 +1556,7 @@ if data and data.get('totalGames', 0) > 0:
                         "actual_ks": 0,
                         "graded": 0
                     } for kp in k_projections]
-                    ksave = requests.post(
+                    ksave = http_post(
                         f"{SUPABASE_URL}/rest/v1/pitcher_predictions?on_conflict=date,player_id,game_pk",
                         json=payload, headers=DB_HEADERS_UPSERT
                     )
@@ -1588,7 +1578,7 @@ if data and data.get('totalGames', 0) > 0:
             with hit_tab:
                 @st.cache_data(ttl=300)
                 def load_hitting_predictions():
-                    res = requests.get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
+                    res = http_get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
                     return res.json() if res.status_code == 200 else []
 
                 raw = load_hitting_predictions()
@@ -1728,7 +1718,7 @@ if data and data.get('totalGames', 0) > 0:
             with pitch_tab:
                 @st.cache_data(ttl=300)
                 def load_pitching_predictions():
-                    res = requests.get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
+                    res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
                     return res.json() if res.status_code == 200 else []
 
                 p_raw = load_pitching_predictions()
@@ -1775,7 +1765,7 @@ if data and data.get('totalGames', 0) > 0:
         ops_plus = "N/A"
         try:
             ops_plus = calculate_ops_plus(ov_hit['stats'][0]['splits'][0]['stat'], league_stats)
-        except:
+        except Exception:
             pass
 
         if adv_hit:
@@ -1785,9 +1775,9 @@ if data and data.get('totalGames', 0) > 0:
             c2.metric("BABIP", adv_hit.get('babip', '.000'))
             c3.metric("ISO",   adv_hit.get('iso', '.000'))
             try:    c4.metric("K%",  f"{float(adv_hit.get('strikeoutsPerPlateAppearance', 0))*100:.1f}%")
-            except: c4.metric("K%",  "N/A")
+            except Exception: c4.metric("K%",  "N/A")
             try:    c5.metric("BB%", f"{float(adv_hit.get('walksPerPlateAppearance', 0))*100:.1f}%")
-            except: c5.metric("BB%", "N/A")
+            except Exception: c5.metric("BB%", "N/A")
             st.divider()
 
         c_l, c_r = st.columns(2)
@@ -1796,14 +1786,14 @@ if data and data.get('totalGames', 0) > 0:
             try:
                 s = get_season_stats(h_id, "hitting", current_year, split="vl")['stats'][0]['splits'][0]['stat']
                 st.markdown(f"**AVG:** {s.get('avg', '.000')} | **OPS:** {s.get('ops', '.000')} | **HR:** {s.get('homeRuns', 0)}")
-            except:
+            except Exception:
                 st.info("No stats vs LHP.")
         with c_r:
             st.markdown("#### vs RHP")
             try:
                 s = get_season_stats(h_id, "hitting", current_year, split="vr")['stats'][0]['splits'][0]['stat']
                 st.markdown(f"**AVG:** {s.get('avg', '.000')} | **OPS:** {s.get('ops', '.000')} | **HR:** {s.get('homeRuns', 0)}")
-            except:
+            except Exception:
                 st.info("No stats vs RHP.")
 
         st.divider()
