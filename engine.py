@@ -163,6 +163,33 @@ def sample_weight(pa, min_pa):
 
 
 # ============================================================
+# ADDITIVE ENGINE COMPONENTS (sample-aware)
+# ============================================================
+def split_ops_points(split_ops, pa):
+    """Platoon-split OPS contribution (0..WEIGHT_SPLIT), shrunk toward 0 for
+    small samples so a 5-PA hot split can't masquerade as a real edge.
+    At/above SPLIT_MIN_PA this matches the original full-credit formula."""
+    try:
+        raw = min(WEIGHT_SPLIT, max(0.0, (float(split_ops) - 0.500) * 50))
+    except Exception:
+        return 0
+    return int(raw * sample_weight(pa, SPLIT_MIN_PA))
+
+def bvp_bonus_points(bvp_avg, pa):
+    """Batter-vs-pitcher bonus (0..WEIGHT_BVP), shrunk toward 0 for small
+    samples. Tiny BvP histories are mostly noise, so they earn little credit
+    until the sample reaches BVP_MIN_PA."""
+    try:
+        avg = float(bvp_avg)
+    except Exception:
+        return 0
+    base = WEIGHT_BVP if avg >= 0.350 else (WEIGHT_BVP * 0.5 if avg >= 0.250 else 0.0)
+    if base <= 0:
+        return 0
+    return int(round(base * sample_weight(pa, BVP_MIN_PA)))
+
+
+# ============================================================
 # SCALED BABIP PENALTY (additive engine)
 # ============================================================
 def scaled_babip_penalty(babip_str):
