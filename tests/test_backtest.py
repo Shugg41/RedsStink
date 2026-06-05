@@ -121,6 +121,53 @@ def test_best_threshold_none_when_too_few_priced():
 
 
 # ------------------------------------------------------------
+# last_game_recap
+# ------------------------------------------------------------
+def _drow(date, tier="🟢 Tier 1", win=1, score=80, price=None):
+    r = {"date": date, "tier": tier, "win": win, "graded": 1,
+         "score": score, "player_name": f"P{score}"}
+    if price is not None:
+        r["odds_price"] = price
+    return r
+
+def test_recap_none_when_no_graded():
+    assert bt.last_game_recap([]) is None
+    assert bt.last_game_recap([_drow("2026-06-01", win=-1)]) is None
+
+def test_recap_picks_most_recent_date():
+    rows = [_drow("2026-06-01", win=1), _drow("2026-06-04", win=0)]
+    recap = bt.last_game_recap(rows)
+    assert recap["date"] == "2026-06-04"
+    assert recap["n"] == 1  # only the latest date is summarized
+
+def test_recap_counts_record_for_straight_bets_only():
+    rows = [
+        _drow("2026-06-04", tier="🟢 Tier 1", win=1),
+        _drow("2026-06-04", tier="🟡 Tier 2", win=0),
+        _drow("2026-06-04", tier="🔴 Tier 3", win=1),   # fade, excluded from record
+    ]
+    recap = bt.last_game_recap(rows)
+    assert (recap["wins"], recap["losses"], recap["n"]) == (1, 1, 2)
+
+def test_recap_units_from_tier1_priced():
+    rows = [
+        _drow("2026-06-04", tier="🟢 Tier 1", win=1, price=100),   # +1u
+        _drow("2026-06-04", tier="🟢 Tier 1", win=0, price=100),   # -1u
+    ]
+    recap = bt.last_game_recap(rows)
+    assert recap["units"] == pytest.approx(0.0)
+    assert recap["n_priced"] == 2
+
+def test_recap_orders_tier1_first():
+    rows = [
+        _drow("2026-06-04", tier="🟡 Tier 2", score=60),
+        _drow("2026-06-04", tier="🟢 Tier 1", score=90),
+    ]
+    recap = bt.last_game_recap(rows)
+    assert "Tier 1" in recap["picks"][0]["tier"]
+
+
+# ------------------------------------------------------------
 # loader
 # ------------------------------------------------------------
 def test_load_rows_from_file(tmp_path):

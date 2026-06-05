@@ -140,6 +140,39 @@ def best_threshold(rows, score_key="score", min_priced=10, **kw):
     return max(candidates, key=lambda s: s["roi_pct"])
 
 
+def last_game_recap(rows):
+    """Quick 'how did we do last game?' summary of the most recent graded date.
+
+    Counts the straight bets (Tier 1 & 2 — Tier 3 are fades, not plays) and
+    returns wins/losses, win rate, Tier-1 units, the opponent, and the per-pick
+    list sorted best-first. Returns None if there are no graded plays yet.
+    """
+    g = [r for r in graded_rows(rows) if r.get("date")]
+    if not g:
+        return None
+    last_date = max(r["date"] for r in g)
+    day = [r for r in g if r["date"] == last_date]
+
+    def _tier(r):
+        return str(r.get("tier", ""))
+
+    straight = [r for r in day if "Tier 3" not in _tier(r)]   # 1 & 2 = the bets
+    wins   = sum(1 for r in straight if int(r["win"]) == 1)
+    losses = sum(1 for r in straight if int(r["win"]) == 0)
+    rate, n = win_rate(straight)
+    units, roi_pct, n_priced = roi([r for r in straight if "Tier 1" in _tier(r)])
+    opp = next((r.get("opp_pitcher") for r in day if r.get("opp_pitcher")), None)
+    picks = sorted(straight,
+                   key=lambda r: (0 if "Tier 1" in _tier(r) else 1,
+                                  -float(r.get("score", 0) or 0)))
+    return {
+        "date": last_date, "opp_pitcher": opp,
+        "wins": wins, "losses": losses, "n": n, "win_rate": rate,
+        "units": units, "roi_pct": roi_pct, "n_priced": n_priced,
+        "picks": picks,
+    }
+
+
 # ============================================================
 # REPORT
 # ============================================================
