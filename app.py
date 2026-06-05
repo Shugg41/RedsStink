@@ -966,26 +966,28 @@ def render_strikeout_panel(pitcher_id, pitcher_name, proj_k, receipt, year):
 def _recap_model_block(label, s):
     """Render one model's last-game line (record / win% / units)."""
     st.markdown(f"**{label}**")
-    if s['n'] == 0:
+    if s.get('n', 0) == 0:
         st.caption("No plays")
         return
-    won = s['wins'] >= s['losses']
+    wins, losses = s.get('wins', 0), s.get('losses', 0)
+    won = wins >= losses
     c1, c2, c3 = st.columns(3)
-    c1.metric("Record", f"{s['wins']}–{s['losses']}",
+    c1.metric("Record", f"{wins}–{losses}",
               delta="WIN ✅" if won else "LOSS ❌",
               delta_color="normal" if won else "inverse")
-    c2.metric("Win %", f"{s['win_rate']*100:.0f}%")
-    c3.metric("Units", f"{s['units']:+.2f}u" if s['n_priced'] else "—")
+    c2.metric("Win %", f"{s.get('win_rate', 0)*100:.0f}%")
+    c3.metric("Units", f"{s.get('units', 0):+.2f}u" if s.get('n_priced') else "—")
 
 def render_last_game_recap(recap):
     """Top-of-analytics card comparing the two models on the last game."""
-    head = f"#### 📅 Last Game — {recap['date']}"
+    head = f"#### 📅 Last Game — {recap.get('date', '')}"
     if recap.get('opp_pitcher'):
         head += f"  ·  vs {recap['opp_pitcher']}"
     st.markdown(head)
 
-    a, m = recap['additive'], recap['mult']
-    if a['n'] == 0 and m['n'] == 0:
+    a = recap.get('additive') or {}
+    m = recap.get('mult') or {}
+    if a.get('n', 0) == 0 and m.get('n', 0) == 0:
         st.caption("Neither model had a play on that date.")
         return
 
@@ -1467,11 +1469,16 @@ if data and data.get('totalGames', 0) > 0:
 
             raw = load_hitting_predictions()
 
-            # Quick "how did we do last game?" recap, shown above everything else
-            recap = last_game_recap(raw) if raw else None
-            if recap:
-                render_last_game_recap(recap)
-                st.divider()
+            # Quick "how did we do last game?" recap, shown above everything
+            # else. Wrapped so it can never take down the analytics page (e.g.
+            # if a deploy briefly serves mismatched module versions).
+            try:
+                recap = last_game_recap(raw) if raw else None
+                if recap:
+                    render_last_game_recap(recap)
+                    st.divider()
+            except Exception:
+                pass
 
             hit_tab, pitch_tab = st.tabs(["🔥 Hitting Tracker", "⚾ Pitching Tracker"])
             with hit_tab:
