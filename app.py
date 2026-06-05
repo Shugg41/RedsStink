@@ -10,6 +10,7 @@ import dateutil.parser
 
 # Pure scoring / odds / stat math (no Streamlit) — also used by tests & backtest
 from engine import *  # noqa: F401,F403
+from backtest import last_game_recap
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -962,6 +963,32 @@ def render_strikeout_panel(pitcher_id, pitcher_name, proj_k, receipt, year):
         } for g in reversed(p_logs[-5:])]
         st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
 
+def render_last_game_recap(recap):
+    """Top-of-analytics 'how did we do last game?' card."""
+    head = f"#### 📅 Last Game — {recap['date']}"
+    if recap.get('opp_pitcher'):
+        head += f"  ·  vs {recap['opp_pitcher']}"
+    st.markdown(head)
+
+    if recap['n'] == 0:
+        st.caption("No straight (Tier 1/2) plays on that date.")
+        return
+
+    won = recap['wins'] >= recap['losses']
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Record (T1/T2)", f"{recap['wins']}–{recap['losses']}",
+              delta="WIN ✅" if won else "LOSS ❌", delta_color="normal" if won else "inverse")
+    c2.metric("Win %", f"{recap['win_rate']*100:.0f}%")
+    c3.metric("Units (T1)", f"{recap['units']:+.2f}u" if recap['n_priced'] else "—")
+
+    table = [{
+        "Player": p.get('player_name', '?'),
+        "Tier":   "T1" if "Tier 1" in str(p.get('tier', '')) else "T2",
+        "Hits":   p.get('actual_hits'),
+        "Result": "✅ WIN" if int(p['win']) == 1 else "❌ LOSS",
+    } for p in recap['picks']]
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+
 # ============================================================
 # EXECUTE AUTO-GRADER
 # ============================================================
@@ -1416,16 +1443,23 @@ if data and data.get('totalGames', 0) > 0:
     # ----------------------------------------------------------
     with tab3:
         st.markdown("### 📊 Engine Performance")
-        hit_tab, pitch_tab = st.tabs(["🔥 Hitting Tracker", "⚾ Pitching Tracker"])
 
         if SUPABASE_URL:
-            with hit_tab:
-                @st.cache_data(ttl=300)
-                def load_hitting_predictions():
-                    res = http_get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
-                    return res.json() if res.status_code == 200 else []
+            @st.cache_data(ttl=300)
+            def load_hitting_predictions():
+                res = http_get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
+                return res.json() if res.status_code == 200 else []
 
-                raw = load_hitting_predictions()
+            raw = load_hitting_predictions()
+
+            # Quick "how did we do last game?" recap, shown above everything else
+            recap = last_game_recap(raw) if raw else None
+            if recap:
+                render_last_game_recap(recap)
+                st.divider()
+
+            hit_tab, pitch_tab = st.tabs(["🔥 Hitting Tracker", "⚾ Pitching Tracker"])
+            with hit_tab:
                 if raw:
                     df_track  = pd.DataFrame(raw)
                     df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)].copy()
