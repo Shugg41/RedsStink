@@ -140,12 +140,20 @@ def best_threshold(rows, score_key="score", min_priced=10, **kw):
     return max(candidates, key=lambda s: s["roi_pct"])
 
 
-def last_game_recap(rows):
-    """Quick 'how did we do last game?' summary of the most recent graded date.
+def _summarize_picks(picks):
+    """Record / win rate / units for one model's Tier-1 set."""
+    rate, n = win_rate(picks)
+    units, roi_pct, n_priced = roi(picks)
+    wins   = sum(1 for r in picks if int(r["win"]) == 1)
+    losses = sum(1 for r in picks if int(r["win"]) == 0)
+    return {"wins": wins, "losses": losses, "n": n, "win_rate": rate,
+            "units": units, "roi_pct": roi_pct, "n_priced": n_priced}
 
-    Counts the straight bets (Tier 1 & 2 — Tier 3 are fades, not plays) and
-    returns wins/losses, win rate, Tier-1 units, the opponent, and the per-pick
-    list sorted best-first. Returns None if there are no graded plays yet.
+def last_game_recap(rows):
+    """Quick 'how did each model do last game?' summary of the most recent
+    graded date. Compares the two engines on the plays each one liked (its
+    Tier 1): the additive `score`/`tier` engine vs the multiplicative
+    `mult_score`/`mult_tier` engine. Returns None if there are no graded plays.
     """
     g = [r for r in graded_rows(rows) if r.get("date")]
     if not g:
@@ -153,22 +161,17 @@ def last_game_recap(rows):
     last_date = max(r["date"] for r in g)
     day = [r for r in g if r["date"] == last_date]
 
-    def _tier(r):
-        return str(r.get("tier", ""))
+    def _is_add(r):  return "Tier 1" in str(r.get("tier", ""))
+    def _is_mult(r): return "Tier 1" in str(r.get("mult_tier", ""))
 
-    straight = [r for r in day if "Tier 3" not in _tier(r)]   # 1 & 2 = the bets
-    wins   = sum(1 for r in straight if int(r["win"]) == 1)
-    losses = sum(1 for r in straight if int(r["win"]) == 0)
-    rate, n = win_rate(straight)
-    units, roi_pct, n_priced = roi([r for r in straight if "Tier 1" in _tier(r)])
     opp = next((r.get("opp_pitcher") for r in day if r.get("opp_pitcher")), None)
-    picks = sorted(straight,
-                   key=lambda r: (0 if "Tier 1" in _tier(r) else 1,
-                                  -float(r.get("score", 0) or 0)))
+    # Players either model flagged as Tier 1, best-first for the breakdown table
+    picks = sorted([r for r in day if _is_add(r) or _is_mult(r)],
+                   key=lambda r: -float(r.get("score", 0) or 0))
     return {
         "date": last_date, "opp_pitcher": opp,
-        "wins": wins, "losses": losses, "n": n, "win_rate": rate,
-        "units": units, "roi_pct": roi_pct, "n_priced": n_priced,
+        "additive": _summarize_picks([r for r in day if _is_add(r)]),
+        "mult":     _summarize_picks([r for r in day if _is_mult(r)]),
         "picks": picks,
     }
 
