@@ -963,31 +963,46 @@ def render_strikeout_panel(pitcher_id, pitcher_name, proj_k, receipt, year):
         } for g in reversed(p_logs[-5:])]
         st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
 
+def _recap_model_block(label, s):
+    """Render one model's last-game line (record / win% / units)."""
+    st.markdown(f"**{label}**")
+    if s['n'] == 0:
+        st.caption("No plays")
+        return
+    won = s['wins'] >= s['losses']
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Record", f"{s['wins']}–{s['losses']}",
+              delta="WIN ✅" if won else "LOSS ❌",
+              delta_color="normal" if won else "inverse")
+    c2.metric("Win %", f"{s['win_rate']*100:.0f}%")
+    c3.metric("Units", f"{s['units']:+.2f}u" if s['n_priced'] else "—")
+
 def render_last_game_recap(recap):
-    """Top-of-analytics 'how did we do last game?' card."""
+    """Top-of-analytics card comparing the two models on the last game."""
     head = f"#### 📅 Last Game — {recap['date']}"
     if recap.get('opp_pitcher'):
         head += f"  ·  vs {recap['opp_pitcher']}"
     st.markdown(head)
 
-    if recap['n'] == 0:
-        st.caption("No straight (Tier 1/2) plays on that date.")
+    a, m = recap['additive'], recap['mult']
+    if a['n'] == 0 and m['n'] == 0:
+        st.caption("Neither model had a play on that date.")
         return
 
-    won = recap['wins'] >= recap['losses']
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Record (T1/T2)", f"{recap['wins']}–{recap['losses']}",
-              delta="WIN ✅" if won else "LOSS ❌", delta_color="normal" if won else "inverse")
-    c2.metric("Win %", f"{recap['win_rate']*100:.0f}%")
-    c3.metric("Units (T1)", f"{recap['units']:+.2f}u" if recap['n_priced'] else "—")
+    col_a, col_m = st.columns(2)
+    with col_a: _recap_model_block("🅰️ Additive model", a)
+    with col_m: _recap_model_block("✖️ Multiplicative model", m)
 
+    # Which model was on each player, and how it turned out
     table = [{
-        "Player": p.get('player_name', '?'),
-        "Tier":   "T1" if "Tier 1" in str(p.get('tier', '')) else "T2",
-        "Hits":   p.get('actual_hits'),
-        "Result": "✅ WIN" if int(p['win']) == 1 else "❌ LOSS",
+        "Player":   p.get('player_name', '?'),
+        "Additive": "🟢" if "Tier 1" in str(p.get('tier', '')) else "·",
+        "Mult":     "🟢" if "Tier 1" in str(p.get('mult_tier', '')) else "·",
+        "Hits":     p.get('actual_hits'),
+        "Result":   "✅ WIN" if int(p['win']) == 1 else "❌ LOSS",
     } for p in recap['picks']]
-    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    if table:
+        st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
 
 # ============================================================
 # EXECUTE AUTO-GRADER
