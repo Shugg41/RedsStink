@@ -203,6 +203,27 @@ def season_scoreboard(rows):
     }
 
 
+# ROI needs a decent priced sample to mean anything; below this we rank the
+# models by win rate instead (a far larger, more reliable sample early on).
+MIN_PRICED_FOR_ROI = 20
+
+def scoreboard_verdict(sb, min_priced=MIN_PRICED_FOR_ROI):
+    """Which model is ahead. Uses ROI only when BOTH have enough priced bets;
+    otherwise ranks by win rate. Returns {leader, basis, a, m} or None.
+    leader ∈ {'additive','mult','tie'}; basis ∈ {'roi','win_rate'}."""
+    if not sb:
+        return None
+    a, m = sb.get("additive", {}), sb.get("mult", {})
+    if a.get("n", 0) == 0 or m.get("n", 0) == 0:
+        return None
+    if a.get("n_priced", 0) >= min_priced and m.get("n_priced", 0) >= min_priced:
+        basis, a_val, m_val = "roi", a["roi_pct"], m["roi_pct"]
+    else:
+        basis, a_val, m_val = "win_rate", a["win_rate"], m["win_rate"]
+    leader = "tie" if a_val == m_val else ("additive" if a_val > m_val else "mult")
+    return {"leader": leader, "basis": basis, "a": a_val, "m": m_val}
+
+
 # ============================================================
 # REPORT
 # ============================================================
