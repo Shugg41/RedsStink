@@ -176,6 +176,33 @@ def last_game_recap(rows):
     }
 
 
+# Typical break-even win rate at -110 juice (a standard straight prop price).
+BREAKEVEN_WIN_RATE = 0.524
+
+def _season_model(rows, tier_key, score_key):
+    """Season summary for one model: its Tier-1 picks' record/units + Brier."""
+    picks = [r for r in rows if "Tier 1" in str(r.get(tier_key, ""))]
+    s = _summarize_picks(picks)
+    b, bn = brier(picks, score_key)
+    s["brier"] = b
+    s["brier_n"] = bn
+    return s
+
+def season_scoreboard(rows):
+    """All-time head-to-head of the two engines, each graded on the Tier-1
+    plays IT recommended. Returns {n_games, n_graded, additive, mult} or None."""
+    g = graded_rows(rows)
+    if not g:
+        return None
+    dates = {r.get("date") for r in g if r.get("date")}
+    return {
+        "n_games":  len(dates),
+        "n_graded": len(g),
+        "additive": _season_model(g, "tier", "score"),
+        "mult":     _season_model(g, "mult_tier", "mult_score"),
+    }
+
+
 # ============================================================
 # REPORT
 # ============================================================

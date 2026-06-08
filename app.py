@@ -10,7 +10,7 @@ import dateutil.parser
 
 # Pure scoring / odds / stat math (no Streamlit) — also used by tests & backtest
 from engine import *  # noqa: F401,F403
-from backtest import last_game_recap
+from backtest import last_game_recap, season_scoreboard, BREAKEVEN_WIN_RATE
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -1006,6 +1006,60 @@ def render_last_game_recap(recap):
     if table:
         st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
 
+def _brier_grade(b):
+    if   b <= 0.17: return "A"
+    elif b <= 0.21: return "B"
+    elif b <= 0.25: return "C"
+    return "D"
+
+def _scoreboard_model_block(label, s):
+    """One model's season column: plays, record, win% vs break-even, units, grade."""
+    st.markdown(f"**{label}**")
+    n = s.get('n', 0)
+    if n == 0:
+        st.caption("No Tier 1 plays yet")
+        return
+    wins, losses = s.get('wins', 0), s.get('losses', 0)
+    rate = s.get('win_rate', 0.0)
+    c1, c2 = st.columns(2)
+    c1.metric("Record", f"{wins}–{losses}", help=f"{n} Tier 1 plays")
+    # Win % shown against the ~52.4% break-even line (green = beating the juice)
+    c2.metric("Win %", f"{rate*100:.1f}%",
+              delta=f"{(rate - BREAKEVEN_WIN_RATE)*100:+.1f} vs break-even",
+              delta_color="normal")
+    c3, c4 = st.columns(2)
+    if s.get('n_priced'):
+        c3.metric("Units", f"{s.get('units', 0):+.2f}u")
+        c4.metric("ROI", f"{s.get('roi_pct', 0):+.1f}%", help=f"{s['n_priced']} priced bets")
+    else:
+        c3.metric("Units", "—", help="no stored odds yet")
+        c4.metric("ROI", "—")
+    if s.get('brier_n'):
+        st.caption(f"Calibration grade **{_brier_grade(s['brier'])}** "
+                   f"(Brier {s['brier']:.3f}, 0.25 = coin flip)")
+
+def render_season_scoreboard(sb):
+    """All-time two-model scoreboard for the top of the analytics page."""
+    st.markdown(f"#### 🏆 Season Scoreboard — {sb.get('n_games', 0)} games")
+    st.caption("Each model graded on the Tier 1 plays IT recommended, all-time. "
+               "Win % is vs the ~52.4% break-even at standard −110 juice.")
+    a = sb.get('additive') or {}
+    m = sb.get('mult') or {}
+    col_a, col_m = st.columns(2)
+    with col_a: _scoreboard_model_block("🅰️ Additive model", a)
+    with col_m: _scoreboard_model_block("✖️ Multiplicative model", m)
+
+    # Plain-English verdict: who's ahead (by ROI if priced, else win rate)
+    if a.get('n') and m.get('n'):
+        if a.get('n_priced') and m.get('n_priced'):
+            lead = "🅰️ Additive" if a['roi_pct'] >= m['roi_pct'] else "✖️ Multiplicative"
+            st.info(f"📈 **{lead}** is ahead this season "
+                    f"(ROI {a['roi_pct']:+.1f}% vs {m['roi_pct']:+.1f}%).")
+        else:
+            lead = "🅰️ Additive" if a['win_rate'] >= m['win_rate'] else "✖️ Multiplicative"
+            st.info(f"📈 **{lead}** is ahead this season "
+                    f"(win rate {a['win_rate']*100:.1f}% vs {m['win_rate']*100:.1f}%).")
+
 # ============================================================
 # EXECUTE AUTO-GRADER
 # ============================================================
@@ -1476,6 +1530,15 @@ if data and data.get('totalGames', 0) > 0:
                 recap = last_game_recap(raw) if raw else None
                 if recap:
                     render_last_game_recap(recap)
+                    st.divider()
+            except Exception:
+                pass
+
+            # Season-long two-model scoreboard (same defensive wrapping)
+            try:
+                sb = season_scoreboard(raw) if raw else None
+                if sb:
+                    render_season_scoreboard(sb)
                     st.divider()
             except Exception:
                 pass

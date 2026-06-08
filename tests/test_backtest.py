@@ -170,6 +170,34 @@ def test_recap_ignores_tier3_only_players():
 
 
 # ------------------------------------------------------------
+# season_scoreboard
+# ------------------------------------------------------------
+def test_scoreboard_none_when_no_graded():
+    assert bt.season_scoreboard([]) is None
+
+def test_scoreboard_counts_games_and_both_models():
+    rows = [
+        _drow("2026-06-03", tier="🟢 Tier 1", mult_tier="🔴 Tier 3", win=1, score=85),
+        _drow("2026-06-04", tier="🔴 Tier 3", mult_tier="🟢 Tier 1", win=0),
+        _drow("2026-06-04", tier="🟢 Tier 1", mult_tier="🟢 Tier 1", win=1, score=90),
+    ]
+    sb = bt.season_scoreboard(rows)
+    assert sb["n_games"] == 2          # two distinct dates
+    assert sb["n_graded"] == 3
+    # additive Tier 1: rows 1 & 3 -> 2-0 ; mult Tier 1: rows 2 & 3 -> 1-1
+    assert (sb["additive"]["wins"], sb["additive"]["losses"]) == (2, 0)
+    assert (sb["mult"]["wins"], sb["mult"]["losses"]) == (1, 1)
+
+def test_scoreboard_brier_uses_each_models_own_score():
+    # Additive nails it (score 100, win); mult would use mult_score.
+    rows = [_drow("2026-06-04", tier="🟢 Tier 1", mult_tier="🔴 Tier 3", win=1, score=100)]
+    sb = bt.season_scoreboard(rows)
+    assert sb["additive"]["brier"] == pytest.approx(0.0)
+    assert sb["additive"]["brier_n"] == 1
+    assert sb["mult"]["n"] == 0
+
+
+# ------------------------------------------------------------
 # loader
 # ------------------------------------------------------------
 def test_load_rows_from_file(tmp_path):
