@@ -198,6 +198,43 @@ def test_scoreboard_brier_uses_each_models_own_score():
 
 
 # ------------------------------------------------------------
+# scoreboard_verdict — ranks by win rate until ROI has a real sample
+# ------------------------------------------------------------
+def _sb(a_wins, a_losses, m_wins, m_losses, a_priced=0, m_priced=0,
+        a_roi=0.0, m_roi=0.0):
+    def model(w, l, priced, roi):
+        n = w + l
+        return {"n": n, "wins": w, "losses": l,
+                "win_rate": (w / n) if n else 0.0,
+                "n_priced": priced, "roi_pct": roi, "units": 0.0,
+                "brier": 0.0, "brier_n": n}
+    return {"additive": model(a_wins, a_losses, a_priced, a_roi),
+            "mult": model(m_wins, m_losses, m_priced, m_roi)}
+
+def test_verdict_uses_win_rate_when_few_priced():
+    # The exact case from the live app: additive wins way more, but ROI (on a
+    # tiny priced sample) favors mult. Win rate must win the verdict.
+    sb = _sb(34, 19, 5, 8, a_priced=5, m_priced=5, a_roi=-41.6, m_roi=-27.6)
+    v = bt.scoreboard_verdict(sb)
+    assert v["leader"] == "additive"
+    assert v["basis"] == "win_rate"
+
+def test_verdict_uses_roi_when_both_have_enough_priced():
+    sb = _sb(30, 20, 30, 20, a_priced=40, m_priced=40, a_roi=2.0, m_roi=8.0)
+    v = bt.scoreboard_verdict(sb)
+    assert v["leader"] == "mult" and v["basis"] == "roi"
+
+def test_verdict_none_when_a_model_has_no_plays():
+    sb = _sb(10, 5, 0, 0)
+    assert bt.scoreboard_verdict(sb) is None
+
+def test_verdict_tie_on_win_rate():
+    sb = _sb(5, 5, 5, 5)
+    v = bt.scoreboard_verdict(sb)
+    assert v["leader"] == "tie"
+
+
+# ------------------------------------------------------------
 # loader
 # ------------------------------------------------------------
 def test_load_rows_from_file(tmp_path):

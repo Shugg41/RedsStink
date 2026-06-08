@@ -18,11 +18,14 @@ from engine import *  # noqa: F401,F403
 # scoreboard (they no-op to None) until the deploy settles, instead of taking
 # the whole dashboard down.
 try:
-    from backtest import last_game_recap, season_scoreboard, BREAKEVEN_WIN_RATE
+    from backtest import (last_game_recap, season_scoreboard, scoreboard_verdict,
+                          BREAKEVEN_WIN_RATE, MIN_PRICED_FOR_ROI)
 except Exception:  # stale/old backtest.py during a deploy
     def last_game_recap(*a, **k): return None
     def season_scoreboard(*a, **k): return None
+    def scoreboard_verdict(*a, **k): return None
     BREAKEVEN_WIN_RATE = 0.524
+    MIN_PRICED_FOR_ROI = 20
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -1042,7 +1045,11 @@ def _scoreboard_model_block(label, s):
     c3, c4 = st.columns(2)
     if s.get('n_priced'):
         c3.metric("Units", f"{s.get('units', 0):+.2f}u")
-        c4.metric("ROI", f"{s.get('roi_pct', 0):+.1f}%", help=f"{s['n_priced']} priced bets")
+        c4.metric("ROI", f"{s.get('roi_pct', 0):+.1f}%")
+        st.caption(f"⚠️ units/ROI on just **{s['n_priced']}** priced bet(s) — "
+                   "small sample, trust the win rate for now"
+                   if s['n_priced'] < MIN_PRICED_FOR_ROI
+                   else f"units/ROI on {s['n_priced']} priced bets")
     else:
         c3.metric("Units", "—", help="no stored odds yet")
         c4.metric("ROI", "—")
@@ -1061,16 +1068,22 @@ def render_season_scoreboard(sb):
     with col_a: _scoreboard_model_block("🅰️ Additive model", a)
     with col_m: _scoreboard_model_block("✖️ Multiplicative model", m)
 
-    # Plain-English verdict: who's ahead (by ROI if priced, else win rate)
-    if a.get('n') and m.get('n'):
-        if a.get('n_priced') and m.get('n_priced'):
-            lead = "🅰️ Additive" if a['roi_pct'] >= m['roi_pct'] else "✖️ Multiplicative"
-            st.info(f"📈 **{lead}** is ahead this season "
-                    f"(ROI {a['roi_pct']:+.1f}% vs {m['roi_pct']:+.1f}%).")
+    # Plain-English verdict: who's ahead. Uses win rate (the big, reliable
+    # sample) until there are enough priced bets for ROI to mean anything.
+    v = scoreboard_verdict(sb)
+    if v:
+        names = {"additive": "🅰️ Additive", "mult": "✖️ Multiplicative", "tie": "Both models"}
+        name = names[v['leader']]
+        if v['basis'] == 'roi':
+            st.info(f"📈 **{name}** is ahead this season "
+                    f"(ROI {v['a']:+.1f}% vs {v['m']:+.1f}%).")
+        elif v['leader'] == 'tie':
+            st.info(f"📈 The two models are dead even on win rate "
+                    f"({v['a']*100:.1f}%).")
         else:
-            lead = "🅰️ Additive" if a['win_rate'] >= m['win_rate'] else "✖️ Multiplicative"
-            st.info(f"📈 **{lead}** is ahead this season "
-                    f"(win rate {a['win_rate']*100:.1f}% vs {m['win_rate']*100:.1f}%).")
+            st.info(f"📈 **{name}** is ahead this season "
+                    f"(win rate {v['a']*100:.1f}% vs {v['m']*100:.1f}%). "
+                    f"Not enough priced bets yet for a reliable ROI read.")
 
 # ============================================================
 # EXECUTE AUTO-GRADER
