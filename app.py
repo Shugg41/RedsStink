@@ -10,7 +10,19 @@ import dateutil.parser
 
 # Pure scoring / odds / stat math (no Streamlit) — also used by tests & backtest
 from engine import *  # noqa: F401,F403
-from backtest import last_game_recap, season_scoreboard, BREAKEVEN_WIN_RATE
+
+# Analytics helpers live in backtest.py. Import defensively: during a Streamlit
+# Cloud redeploy the new app.py can momentarily run against a cached older
+# backtest.py, and a hard `from backtest import ...` would crash the ENTIRE app
+# at startup. With this guard, a brief version skew just hides the recap /
+# scoreboard (they no-op to None) until the deploy settles, instead of taking
+# the whole dashboard down.
+try:
+    from backtest import last_game_recap, season_scoreboard, BREAKEVEN_WIN_RATE
+except Exception:  # stale/old backtest.py during a deploy
+    def last_game_recap(*a, **k): return None
+    def season_scoreboard(*a, **k): return None
+    BREAKEVEN_WIN_RATE = 0.524
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
