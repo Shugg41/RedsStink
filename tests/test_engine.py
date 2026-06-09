@@ -199,6 +199,55 @@ def test_tier_for_score_boundaries():
 
 
 # ------------------------------------------------------------
+# Strikeout projection — stable IP + opener detection
+# ------------------------------------------------------------
+def test_ip_per_start():
+    assert e.ip_per_start(60.0, 10) == pytest.approx(6.0)
+    assert e.ip_per_start(60.0, 0) == 0.0      # no starts -> 0, no divide error
+    assert e.ip_per_start("bad", 10) == 0.0
+
+def test_is_likely_opener_true_for_short_starts():
+    # 12 starts, 18 IP -> 1.5 IP/start = classic opener
+    assert e.is_likely_opener(18.0, 12) is True
+
+def test_is_likely_opener_false_for_real_starter():
+    # 10 starts, 58 IP -> 5.8 IP/start
+    assert e.is_likely_opener(58.0, 10) is False
+
+def test_is_likely_opener_false_without_starts():
+    assert e.is_likely_opener(40.0, 0) is False  # pure reliever / no data -> don't flag
+
+def test_is_likely_opener_mostly_relief():
+    # 4 starts of 12 appearances, ~4 IP/start (mostly relieves) -> bulk/opener usage
+    assert e.is_likely_opener(16.0, 4, games_played=12) is True
+
+def test_expected_ip_clamps_real_starter_and_ignores_fragile_recent():
+    # Season 5.8 IP/start but a couple short recent outings (L5 avg 2.0).
+    # Old code used 2.0 and under-projected; now it stays near the season anchor.
+    exp = e.expected_starter_ip(58.0, 10, 2.0)
+    assert exp >= e.STARTER_IP_FLOOR
+    assert 4.0 <= exp <= 6.5
+
+def test_expected_ip_opener_stays_low():
+    exp = e.expected_starter_ip(18.0, 12, 1.5)   # opener
+    assert exp < e.STARTER_IP_FLOOR              # not floored up to a starter's innings
+
+def test_expected_ip_thin_data_falls_back():
+    assert e.expected_starter_ip(0, 0, 0) == pytest.approx(e.DEFAULT_STARTER_IP)
+
+def test_base_k_projection():
+    # 9.0 K/9 over 6 IP -> 6.0 Ks
+    assert e.base_k_projection(9.0, 6.0) == pytest.approx(6.0)
+    assert e.base_k_projection("bad", 6.0) == pytest.approx(5.0)  # default K/9 7.5 -> 5.0
+
+def test_stable_ip_fixes_underprojection():
+    # The live bug: K/9 ~8, season 5.8 IP/start, but L5 avg IP cratered to 2.0.
+    old_base = round((8.0 / 9.0) * 2.0, 1)               # = 1.8 (broken)
+    new_base = e.base_k_projection(8.0, e.expected_starter_ip(58.0, 10, 2.0))
+    assert new_base > old_base + 1.5                     # materially higher, no longer absurd
+
+
+# ------------------------------------------------------------
 # run_multiplicative_engine
 # ------------------------------------------------------------
 def _base_inputs(**over):

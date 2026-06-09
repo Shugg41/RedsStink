@@ -198,6 +198,30 @@ def test_scoreboard_brier_uses_each_models_own_score():
 
 
 # ------------------------------------------------------------
+# k_engine_summary — strikeout accuracy
+# ------------------------------------------------------------
+def test_k_summary_empty():
+    assert bt.k_engine_summary([]) == {"n": 0, "avg_miss": 0.0, "bias": 0.0}
+
+def test_k_summary_only_graded_with_projection():
+    rows = [
+        {"graded": 1, "projected_ks": 5.0, "actual_ks": 7},   # miss 2, +2
+        {"graded": 1, "projected_ks": 6.0, "actual_ks": 4},   # miss 2, -2
+        {"graded": 0, "projected_ks": 5.0, "actual_ks": 0},   # ungraded -> ignored
+        {"graded": 1, "projected_ks": None, "actual_ks": 3},  # no projection -> ignored
+    ]
+    s = bt.k_engine_summary(rows)
+    assert s["n"] == 2
+    assert s["avg_miss"] == pytest.approx(2.0)
+    assert s["bias"] == pytest.approx(0.0)
+
+def test_k_summary_bias_sign():
+    rows = [{"graded": 1, "projected_ks": 4.0, "actual_ks": 8}]  # under-projected
+    s = bt.k_engine_summary(rows)
+    assert s["bias"] > 0   # positive bias = pitchers K more than projected
+
+
+# ------------------------------------------------------------
 # scoreboard_verdict — ranks by win rate until ROI has a real sample
 # ------------------------------------------------------------
 def _sb(a_wins, a_losses, m_wins, m_losses, a_priced=0, m_priced=0,
