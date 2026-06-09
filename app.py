@@ -358,12 +358,20 @@ def auto_grade_past_predictions():
                 continue
 
             games = sched['dates'][0]['games']
-            final_games = [g for g in games if g['status']['statusCode'] in ['F', 'O', 'CR', 'FR']]
-            all_postponed = all(g['status']['statusCode'] in ['C', 'P', 'D', 'DI'] for g in games)
+            # A game is gradable when MLB flags it Final — use abstractGameState
+            # (robust) and fall back to known final status codes. Relying only on
+            # a hardcoded code list mislabeled real finals as "no game".
+            def _is_final(g):
+                s = g.get('status', {})
+                return (s.get('abstractGameState') == 'Final'
+                        or s.get('codedGameState') in ('F', 'O')
+                        or s.get('statusCode') in ('F', 'O', 'CR', 'FR'))
+            final_games = [g for g in games if _is_final(g)]
+            all_postponed = all(g['status'].get('statusCode') in ('C', 'P', 'D', 'DI') for g in games)
 
             if final_games:
                 _grade_final_games(final_games, d, today_str)
-            elif all_postponed or (d < today_str and not any(g['status']['statusCode'] in ['I', 'S', 'D', 'DI'] for g in games)):
+            elif all_postponed or (d < today_str and not any(g['status'].get('statusCode') in ('I', 'S', 'D', 'DI') for g in games)):
                 _mark_no_game(d)
         except Exception:
             pass
@@ -1709,11 +1717,18 @@ if data and data.get('totalGames', 0) > 0:
                     res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
                     return res.json() if res.status_code == 200 else []
 
-                # Manual re-grade — covers auto-grader timing and lets you force it
-                if st.button("🔄 Grade pending K projections now"):
-                    st.session_state['last_autograde_time'] = None  # bypass 30-min guard
-                    auto_grade_past_predictions()
-                    load_pitching_predictions.clear()
+                # Manual re-grade — covers auto-grader timing, and un-sticks any
+                # rows wrongly marked "no-result" so they get re-evaluated.
+                if st.button("🔄 Grade / re-check K projections now"):
+                    with st.spinner("Re-grading..."):
+                        try:
+                            http_patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?graded=eq.-1",
+                                       json={"graded": 0, "actual_ks": 0}, headers=DB_HEADERS)
+                        except Exception:
+                            pass
+                        st.session_state['last_autograde_time'] = None  # bypass 30-min guard
+                        auto_grade_past_predictions()
+                        load_pitching_predictions.clear()
                     st.rerun()
 
                 p_raw = load_pitching_predictions()
