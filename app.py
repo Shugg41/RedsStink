@@ -19,11 +19,12 @@ from engine import *  # noqa: F401,F403
 # the whole dashboard down.
 try:
     from backtest import (last_game_recap, season_scoreboard, scoreboard_verdict,
-                          BREAKEVEN_WIN_RATE, MIN_PRICED_FOR_ROI)
+                          k_engine_summary, BREAKEVEN_WIN_RATE, MIN_PRICED_FOR_ROI)
 except Exception:  # stale/old backtest.py during a deploy
     def last_game_recap(*a, **k): return None
     def season_scoreboard(*a, **k): return None
     def scoreboard_verdict(*a, **k): return None
+    def k_engine_summary(*a, **k): return {"n": 0, "avg_miss": 0.0, "bias": 0.0}
     BREAKEVEN_WIN_RATE = 0.524
     MIN_PRICED_FOR_ROI = 20
 
@@ -711,20 +712,31 @@ def get_draftkings_odds():
 # STRIKEOUT ENGINE — projected Ks for one pitcher
 # ============================================================
 def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, park_name, year):
-    """Returns (projected_ks, receipt_lines) where receipt_lines is list of (label, value, description)."""
+    """Returns (projected_ks, receipt_lines, meta). receipt_lines is a list of
+    (label, value, description); meta is {'opener': bool}."""
     if not pitcher_id:
-        return None, []
+        return None, [], {"opener": False}
 
     adv, l5_k_list, l5_avg_k, l5_avg_ip = get_pitcher_k_stats(pitcher_id, year)
     receipt = []
 
-    # --- BASE: K/9 projection ---
+    # --- BASE: K/9 × stable expected innings (anchored on season IP/start) ---
     try:
         k9 = float(adv.get('strikeoutsPer9Inn', adv.get('k9', '7.5')))
     except Exception:
         k9 = 7.5
-    base_ks = round((k9 / 9.0) * l5_avg_ip, 1) if l5_avg_ip > 0 else round(k9 / 9.0 * 5.5, 1)
-    receipt.append(("Base K Projection (K/9 × Avg IP)", base_ks, f"K/9: {k9:.1f}, Avg IP L5: {l5_avg_ip}"))
+    season_gs  = adv.get('gamesStarted', 0)
+    season_gp  = adv.get('gamesPlayed', 0)
+    season_ip  = calc_ip(adv.get('inningsPitched', '0.0'))
+    season_ips = ip_per_start(season_ip, season_gs)
+    exp_ip     = expected_starter_ip(season_ip, season_gs, l5_avg_ip)
+    opener     = is_likely_opener(season_ip, season_gs, season_gp)
+    base_ks    = base_k_projection(k9, exp_ip)
+    receipt.append(("Base K Projection (K/9 × Exp IP)", base_ks,
+                    f"K/9 {k9:.1f} × Exp IP {exp_ip:.1f} (season {season_ips:.1f}/start, L5 {l5_avg_ip})"))
+    if opener:
+        receipt.append(("⚠ Likely opener", 0.0,
+                        f"~{season_ips:.1f} IP/start — projection unreliable; the bulk pitcher gets the Ks"))
 
     # --- FORM: L5 trend vs K/9 baseline ---
     if l5_k_list:
@@ -800,7 +812,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     total_adj   = form_adj + swstr_adj + opp_k_adj + ppa_adj + whip_adj + park_k_adj
     projected_k = round(max(0.0, base_ks + total_adj), 1)
 
-    return projected_k, receipt
+    return projected_k, receipt, {"opener": opener}
 
 # ============================================================
 # PARALLEL HITTER PREFETCH
@@ -1250,6 +1262,12 @@ if data and data.get('totalGames', 0) > 0:
                 c4.metric("HR/9",       adv_stats.get('homeRunsPer9', '0.00'))
                 c5.metric("FIP",        fip_val)
                 c6.metric("Bullpen ERA", opp_bullpen.get('era', '0.00'))
+                if is_likely_opener(calc_ip(adv_stats.get('inningsPitched', '0.0')),
+                                    adv_stats.get('gamesStarted', 0),
+                                    adv_stats.get('gamesPlayed', 0)):
+                    st.warning("⚠️ This 'starter' looks like an **opener** — your hitters face the bulk "
+                               "pitcher for most of the game, so the splits/FIP above may not reflect the "
+                               "real matchup.")
             else:
                 st.info("Advanced stats unavailable for this pitcher.")
             st.divider()
@@ -1498,10 +1516,13 @@ if data and data.get('totalGames', 0) > 0:
 
             with col_reds:
                 with st.spinner(f"Projecting {reds_k_pitcher}..."):
-                    r_proj_k, r_receipt = run_strikeout_engine(
+                    r_proj_k, r_receipt, r_meta = run_strikeout_engine(
                         reds_k_id, reds_k_pitcher, opp_team_id, opponent, park_name, current_year
                     )
                 if r_proj_k is not None:
+                    if r_meta.get('opener'):
+                        st.warning("⚠️ Looks like an **opener** (very few innings per start) — "
+                                   "this projection is unreliable; the bulk reliever behind them gets the Ks.")
                     render_strikeout_panel(reds_k_id, reds_k_pitcher, r_proj_k, r_receipt, current_year)
                     k_projections.append({"player_id": reds_k_id, "player_name": reds_k_pitcher, "projected_ks": r_proj_k})
                 else:
@@ -1510,10 +1531,13 @@ if data and data.get('totalGames', 0) > 0:
             with col_opp:
                 if opp_k_id:
                     with st.spinner(f"Projecting {opp_k_name}..."):
-                        o_proj_k, o_receipt = run_strikeout_engine(
+                        o_proj_k, o_receipt, o_meta = run_strikeout_engine(
                             opp_k_id, opp_k_name, 113, "Cincinnati Reds", park_name, current_year
                         )
                     if o_proj_k is not None:
+                        if o_meta.get('opener'):
+                            st.warning("⚠️ Looks like an **opener** (very few innings per start) — "
+                                       "this projection is unreliable; the bulk reliever behind them gets the Ks.")
                         render_strikeout_panel(opp_k_id, opp_k_name, o_proj_k, o_receipt, current_year)
                         k_projections.append({"player_id": opp_k_id, "player_name": opp_k_name, "projected_ks": o_proj_k})
                 else:
@@ -1751,11 +1775,11 @@ if data and data.get('totalGames', 0) > 0:
                                f"{len(df_pending)} pending · {len(df_nogame)} no-result")
 
                     if not df_pactive.empty:
-                        df_pactive['delta']    = df_pactive['actual_ks'] - df_pactive['projected_ks']
-                        df_pactive['abs_miss'] = df_pactive['delta'].abs()
+                        df_pactive['delta'] = df_pactive['actual_ks'] - df_pactive['projected_ks']
+                        ks = k_engine_summary(df_pactive.to_dict('records'))
                         m1, m2 = st.columns(2)
-                        m1.metric("Avg Miss", f"{df_pactive['abs_miss'].mean():.1f} Ks")
-                        m2.metric("Bias", f"{df_pactive['delta'].mean():+.1f} Ks",
+                        m1.metric("Avg Miss", f"{ks['avg_miss']:.1f} Ks", help=f"{ks['n']} graded starts")
+                        m2.metric("Bias", f"{ks['bias']:+.1f} Ks",
                                   help="Positive = pitchers strike out more than projected (engine runs low)")
                         st.divider()
                         df_pdisplay = df_pactive[['date', 'player_name', 'projected_ks', 'actual_ks', 'delta']].sort_values(by='date', ascending=False).copy()

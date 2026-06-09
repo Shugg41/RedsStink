@@ -224,6 +224,24 @@ def scoreboard_verdict(sb, min_priced=MIN_PRICED_FOR_ROI):
     return {"leader": leader, "basis": basis, "a": a_val, "m": m_val}
 
 
+def k_engine_summary(rows):
+    """Strikeout-engine accuracy over graded pitcher rows. Returns
+    {n, avg_miss, bias}: avg_miss = mean |actual - projected| (lower is better);
+    bias > 0 means pitchers strike out MORE than projected (engine runs low)."""
+    deltas = []
+    for r in rows:
+        try:
+            if int(r.get("graded", 0)) == 1 and r.get("projected_ks") is not None:
+                deltas.append(float(r.get("actual_ks", 0)) - float(r["projected_ks"]))
+        except (TypeError, ValueError):
+            continue
+    if not deltas:
+        return {"n": 0, "avg_miss": 0.0, "bias": 0.0}
+    return {"n": len(deltas),
+            "avg_miss": round(sum(abs(d) for d in deltas) / len(deltas), 2),
+            "bias": round(sum(deltas) / len(deltas), 2)}
+
+
 # ============================================================
 # REPORT
 # ============================================================

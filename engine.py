@@ -111,6 +111,65 @@ def normalize_name(name):
     """Normalize a player name for fuzzy matching across data sources."""
     return name.lower().replace(".", "").replace(" jr", "").replace(" sr", "").replace("-", " ").strip()
 
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+# ============================================================
+# STRIKEOUT PROJECTION — stable expected innings + opener detection
+# ============================================================
+STARTER_IP_FLOOR        = 4.0    # clamp a real starter's expected innings...
+STARTER_IP_CEIL         = 6.5    # ...to a sane range
+OPENER_IP_PER_START_MAX = 3.5    # a "starter" averaging fewer IP than this is likely an opener
+DEFAULT_STARTER_IP      = 5.2    # league-ish fallback when data is thin
+
+def ip_per_start(season_ip, games_started):
+    """Season innings per start (0 if no starts / bad data)."""
+    gs = _safe_float(games_started)
+    return _safe_float(season_ip) / gs if gs > 0 else 0.0
+
+def is_likely_opener(season_ip, games_started, games_played=None):
+    """Best-effort pre-game guess that a listed 'starter' is really an opener
+    or bulk situation: they average very few innings per start, or mostly
+    pitch in relief. There's no official flag, so this powers a caveat, not a
+    fact."""
+    gs = _safe_float(games_started)
+    if gs <= 0:
+        return False
+    ips = ip_per_start(season_ip, gs)
+    if 0 < ips < OPENER_IP_PER_START_MAX:
+        return True
+    gp = _safe_float(games_played) if games_played is not None else gs
+    if gp > 0 and (gs / gp) < 0.5 and ips < 4.5:
+        return True
+    return False
+
+def expected_starter_ip(season_ip, games_started, l5_avg_ip):
+    """Stable expected innings for one start. Anchors on the season IP/start
+    (much steadier than recent innings alone), lightly blended with recent
+    form, and clamped to a sane starter range. An opener keeps its genuinely
+    low workload (we don't floor it up to a starter's innings)."""
+    season_ips = ip_per_start(season_ip, games_started)
+    l5 = _safe_float(l5_avg_ip)
+    if season_ips > 0 and l5 > 0:
+        exp = 0.7 * season_ips + 0.3 * l5
+    elif season_ips > 0:
+        exp = season_ips
+    elif l5 > 0:
+        exp = l5
+    else:
+        exp = DEFAULT_STARTER_IP
+    if 0 < season_ips < OPENER_IP_PER_START_MAX:
+        return round(max(0.5, exp), 2)                       # opener: stay low
+    return round(max(STARTER_IP_FLOOR, min(STARTER_IP_CEIL, exp)), 2)
+
+def base_k_projection(k9, expected_ip):
+    """Base strikeouts = (K/9) × expected innings."""
+    return round((_safe_float(k9, 7.5) / 9.0) * _safe_float(expected_ip), 1)
+
 
 # ============================================================
 # ODDS MATH
