@@ -1709,14 +1709,31 @@ if data and data.get('totalGames', 0) > 0:
                     res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
                     return res.json() if res.status_code == 200 else []
 
+                # Manual re-grade — covers auto-grader timing and lets you force it
+                if st.button("🔄 Grade pending K projections now"):
+                    st.session_state['last_autograde_time'] = None  # bypass 30-min guard
+                    auto_grade_past_predictions()
+                    load_pitching_predictions.clear()
+                    st.rerun()
+
                 p_raw = load_pitching_predictions()
                 if p_raw:
                     df_ptrack  = pd.DataFrame(p_raw)
+                    # Coerce numeric columns: some DB setups return these as text,
+                    # which silently broke the graded/pending filters (== 1 never
+                    # matched a string "1"), so graded rows looked like they vanished.
+                    for col in ('graded', 'projected_ks', 'actual_ks'):
+                        if col in df_ptrack.columns:
+                            df_ptrack[col] = pd.to_numeric(df_ptrack[col], errors='coerce')
                     # Only K-engine rows (have projected_ks); legacy outs rows ignored
                     if 'projected_ks' in df_ptrack.columns:
                         df_ptrack = df_ptrack[df_ptrack['projected_ks'].notna()]
                     df_pactive = df_ptrack[df_ptrack['graded'] == 1].copy() if not df_ptrack.empty else pd.DataFrame()
                     df_pending = df_ptrack[df_ptrack['graded'] == 0].copy() if not df_ptrack.empty else pd.DataFrame()
+                    df_nogame  = df_ptrack[df_ptrack['graded'] == -1].copy() if not df_ptrack.empty else pd.DataFrame()
+
+                    st.caption(f"{len(df_ptrack)} K projections · {len(df_pactive)} graded · "
+                               f"{len(df_pending)} pending · {len(df_nogame)} no-result")
 
                     if not df_pactive.empty:
                         df_pactive['delta']    = df_pactive['actual_ks'] - df_pactive['projected_ks']
@@ -1734,7 +1751,8 @@ if data and data.get('totalGames', 0) > 0:
 
                     if not df_pending.empty:
                         st.markdown("#### ⏳ Pending K Projections")
-                        st.dataframe(df_pending[['date', 'player_name', 'projected_ks']], hide_index=True, use_container_width=True)
+                        st.dataframe(df_pending[['date', 'player_name', 'projected_ks']].sort_values(by='date', ascending=False),
+                                     hide_index=True, use_container_width=True)
                 else:
                     st.info("No pitcher predictions yet.")
 
