@@ -1157,6 +1157,76 @@ def render_lock(lock, shortlist, n_scanned):
         st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
     st.caption("⚠️ Single-game strikeouts are noisy — this is the best *edge*, not a guarantee. Bet responsibly.")
 
+def render_lock_of_the_day(date_str, current_year):
+    """The full Lock-of-the-Day tool. Independent of the Reds schedule, so it
+    works on Reds off-days too."""
+    st.markdown("### 🎯 Strikeout Lock of the Day")
+    st.caption("Scans the full MLB slate, runs every probable starter through the K engine, models "
+               "the over/under with a Poisson distribution, and ranks DraftKings lines by edge. "
+               "Both sides · full slate · guardrails on (skips openers & thin data).")
+
+    if not ODDS_API_KEY:
+        st.warning("Add an `ODDS_API_KEY` to the app secrets to enable the Lock of the Day.")
+        return
+
+    st.caption("⚠️ A scan pulls DraftKings strikeout lines for every game (~1 Odds API credit each).")
+    if st.button("🔎 Scan the slate for today's lock", type="primary", key="lock_scan"):
+        sched = get_league_schedule(date_str)
+        slate = slate_probable_pitchers(sched)
+        if not slate:
+            st.info("No probable pitchers posted for the slate yet — check back closer to game time.")
+        else:
+            with st.spinner(f"Pulling DraftKings strikeout lines ({len(slate)} probable starters)..."):
+                dk = get_dk_pitcher_strikeouts()
+            matched = [p for p in slate if normalize_name(p['pitcher_name']) in dk]
+            if not matched:
+                st.warning(f"Found {len(slate)} probable starters but no DraftKings strikeout lines are "
+                           "posted yet (they usually appear a few hours before first pitch).")
+            else:
+                ctx = get_script_run_ctx() if get_script_run_ctx else None
+                def _project(p):
+                    if ctx and add_script_run_ctx:
+                        add_script_run_ctx(threading.current_thread(), ctx)
+                    try:
+                        proj, receipt, meta = run_strikeout_engine(
+                            p['pitcher_id'], p['pitcher_name'], p['opp_team_id'],
+                            p['opp_team_name'], p['park_name'], current_year)
+                    except Exception:
+                        return None
+                    if proj is None:
+                        return None
+                    dkline = dk.get(normalize_name(p['pitcher_name']), {})
+                    return {**p, 'projection': proj, 'line': dkline.get('line'),
+                            'over_price': dkline.get('over_price'),
+                            'under_price': dkline.get('under_price'),
+                            'opener': meta.get('opener', False),
+                            'data_ok': meta.get('data_ok', True),
+                            'receipt': receipt}
+
+                prog = st.progress(0.0, text="Projecting starters...")
+                cands = []
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    futs = [ex.submit(_project, p) for p in matched]
+                    for i, f in enumerate(as_completed(futs)):
+                        prog.progress((i + 1) / len(futs), text=f"Projecting starters... {i+1}/{len(futs)}")
+                        r = f.result()
+                        if r and r.get('line') is not None:
+                            cands.append(r)
+                prog.empty()
+
+                lock, shortlist = select_locks(cands, sides="both", guardrails=True, top_n=5)
+                st.session_state['lock_result'] = {
+                    'lock': lock, 'shortlist': shortlist,
+                    'n_scanned': len(cands), 'date': date_str
+                }
+
+    res = st.session_state.get('lock_result')
+    if res and res.get('date') == date_str:
+        st.divider()
+        render_lock(res['lock'], res['shortlist'], res['n_scanned'])
+    else:
+        st.info("Tap **Scan the slate** above to find today's lock.")
+
 def _recap_model_block(label, s):
     """Render one model's last-game line (record / win% / units)."""
     st.markdown(f"**{label}**")
@@ -2022,71 +2092,9 @@ if data and data.get('totalGames', 0) > 0:
     # TAB 5 — LOCK OF THE DAY (league-wide strikeout edge hunter)
     # ----------------------------------------------------------
     with tab5:
-        st.markdown("### 🎯 Strikeout Lock of the Day")
-        st.caption("Scans the full MLB slate, runs every probable starter through the K engine, models "
-                   "the over/under with a Poisson distribution, and ranks DraftKings lines by edge. "
-                   "Both sides · full slate · guardrails on (skips openers & thin data).")
-
-        if not ODDS_API_KEY:
-            st.warning("Add an `ODDS_API_KEY` to the app secrets to enable the Lock of the Day.")
-        else:
-            st.caption("⚠️ A scan pulls DraftKings strikeout lines for every game (~1 Odds API credit each).")
-            if st.button("🔎 Scan the slate for today's lock", type="primary", key="lock_scan"):
-                sched = get_league_schedule(date_str)
-                slate = slate_probable_pitchers(sched)
-                if not slate:
-                    st.info("No probable pitchers posted for the slate yet — check back closer to game time.")
-                else:
-                    with st.spinner(f"Pulling DraftKings strikeout lines ({len(slate)} probable starters)..."):
-                        dk = get_dk_pitcher_strikeouts()
-                    matched = [p for p in slate if normalize_name(p['pitcher_name']) in dk]
-                    if not matched:
-                        st.warning(f"Found {len(slate)} probable starters but no DraftKings strikeout lines are "
-                                   "posted yet (they usually appear a few hours before first pitch).")
-                    else:
-                        ctx = get_script_run_ctx() if get_script_run_ctx else None
-                        def _project(p):
-                            if ctx and add_script_run_ctx:
-                                add_script_run_ctx(threading.current_thread(), ctx)
-                            try:
-                                proj, receipt, meta = run_strikeout_engine(
-                                    p['pitcher_id'], p['pitcher_name'], p['opp_team_id'],
-                                    p['opp_team_name'], p['park_name'], current_year)
-                            except Exception:
-                                return None
-                            if proj is None:
-                                return None
-                            dkline = dk.get(normalize_name(p['pitcher_name']), {})
-                            return {**p, 'projection': proj, 'line': dkline.get('line'),
-                                    'over_price': dkline.get('over_price'),
-                                    'under_price': dkline.get('under_price'),
-                                    'opener': meta.get('opener', False),
-                                    'data_ok': meta.get('data_ok', True),
-                                    'receipt': receipt}
-
-                        prog = st.progress(0.0, text="Projecting starters...")
-                        cands = []
-                        with ThreadPoolExecutor(max_workers=8) as ex:
-                            futs = [ex.submit(_project, p) for p in matched]
-                            for i, f in enumerate(as_completed(futs)):
-                                prog.progress((i + 1) / len(futs), text=f"Projecting starters... {i+1}/{len(futs)}")
-                                r = f.result()
-                                if r and r.get('line') is not None:
-                                    cands.append(r)
-                        prog.empty()
-
-                        lock, shortlist = select_locks(cands, sides="both", guardrails=True, top_n=5)
-                        st.session_state['lock_result'] = {
-                            'lock': lock, 'shortlist': shortlist,
-                            'n_scanned': len(cands), 'date': date_str
-                        }
-
-            res = st.session_state.get('lock_result')
-            if res and res.get('date') == date_str:
-                st.divider()
-                render_lock(res['lock'], res['shortlist'], res['n_scanned'])
-            else:
-                st.info("Tap **Scan the slate** above to find today's lock.")
+        render_lock_of_the_day(date_str, current_year)
 
 else:
-    st.warning("🌴 **OFF DAY:** The Reds are resting today.")
+    st.info("🌴 **The Reds are off today** — the Reds-specific boards are hidden, "
+            "but the league-wide tools still work.")
+    render_lock_of_the_day(date_str, current_year)
