@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import html
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import dateutil.parser
@@ -27,6 +27,11 @@ except Exception:  # stale/old backtest.py during a deploy
     def k_engine_summary(*a, **k): return {"n": 0, "avg_miss": 0.0, "bias": 0.0}
     BREAKEVEN_WIN_RATE = 0.524
     MIN_PRICED_FOR_ROI = 20
+
+try:
+    from lock import select_locks
+except Exception:
+    def select_locks(*a, **k): return (None, [])
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -637,6 +642,89 @@ def get_pitcher_k_stats(pitcher_id, year):
     return adv, l5_k_list, l5_avg_k, l5_avg_ip
 
 # ============================================================
+# LEAGUE-WIDE SLATE (Lock of the Day)
+# ============================================================
+@st.cache_data(ttl=1800)
+def get_league_schedule(date_str):
+    """All MLB games for a date with probable pitchers hydrated."""
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher"
+    try:
+        return http_get(url).json()
+    except Exception:
+        return {}
+
+def slate_probable_pitchers(sched):
+    """Flatten the league schedule into a list of probable-starter dicts:
+    {pitcher_id, pitcher_name, team_name, opp_team_id, opp_team_name, park_name}."""
+    out = []
+    for d in sched.get('dates', []):
+        for g in d.get('games', []):
+            venue = g.get('venue', {}).get('name', 'Unknown')
+            teams = g.get('teams', {})
+            for side, opp in (('home', 'away'), ('away', 'home')):
+                pp = teams.get(side, {}).get('probablePitcher')
+                if not pp or not pp.get('id'):
+                    continue
+                out.append({
+                    'pitcher_id':    pp.get('id'),
+                    'pitcher_name':  pp.get('fullName', ''),
+                    'team_name':     teams.get(side, {}).get('team', {}).get('name', ''),
+                    'opp_team_id':   teams.get(opp, {}).get('team', {}).get('id'),
+                    'opp_team_name': teams.get(opp, {}).get('team', {}).get('name', ''),
+                    'park_name':     venue,
+                })
+    return out
+
+def get_dk_pitcher_strikeouts(cap=None):
+    """League-wide DraftKings pitcher_strikeouts lines, keyed by normalized name:
+    {name: {'line', 'over_price', 'under_price'}}. Costs ~1 Odds API credit per
+    event, so this is on-demand only."""
+    if not ODDS_API_KEY:
+        return {}
+    base = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
+    out = {}
+    try:
+        ev_res = http_get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
+        if ev_res.status_code != 200:
+            st.error(f"Odds API (events) failed: {ev_res.text[:160]}")
+            return {}
+        events = ev_res.json() or []
+        if cap:
+            events = events[:cap]
+        for e in events:
+            eid = e.get('id')
+            if not eid:
+                continue
+            r = http_get(f"{base}/events/{eid}/odds", params={
+                "apiKey": ODDS_API_KEY, "regions": "us",
+                "markets": "pitcher_strikeouts", "bookmakers": "draftkings",
+                "oddsFormat": "american",
+            })
+            if r.status_code != 200:
+                continue
+            game = r.json()
+            for book in game.get('bookmakers', []):
+                for market in book.get('markets', []):
+                    if market.get('key') != 'pitcher_strikeouts':
+                        continue
+                    for o in market.get('outcomes', []):
+                        nm = normalize_name(o.get('description', ''))
+                        if not nm:
+                            continue
+                        rec = out.setdefault(nm, {'line': o.get('point'),
+                                                  'over_price': None, 'under_price': None})
+                        if o.get('point') is not None:
+                            rec['line'] = o.get('point')
+                        if o.get('name') == 'Over':
+                            rec['over_price'] = o.get('price')
+                        elif o.get('name') == 'Under':
+                            rec['under_price'] = o.get('price')
+        return out
+    except Exception as ex:
+        st.error(f"Odds API (pitcher Ks) error: {ex}")
+        return {}
+
+# ============================================================
 # ODDS API
 # ============================================================
 def get_draftkings_odds():
@@ -715,7 +803,7 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     """Returns (projected_ks, receipt_lines, meta). receipt_lines is a list of
     (label, value, description); meta is {'opener': bool}."""
     if not pitcher_id:
-        return None, [], {"opener": False}
+        return None, [], {"opener": False, "data_ok": False, "exp_ip": 0.0}
 
     adv, l5_k_list, l5_avg_k, l5_avg_ip = get_pitcher_k_stats(pitcher_id, year)
     receipt = []
@@ -812,7 +900,8 @@ def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, p
     total_adj   = form_adj + swstr_adj + opp_k_adj + ppa_adj + whip_adj + park_k_adj
     projected_k = round(max(0.0, base_ks + total_adj), 1)
 
-    return projected_k, receipt, {"opener": opener}
+    meta = {"opener": opener, "data_ok": (season_ip > 0 or l5_avg_ip > 0), "exp_ip": exp_ip}
+    return projected_k, receipt, meta
 
 # ============================================================
 # PARALLEL HITTER PREFETCH
@@ -997,6 +1086,76 @@ def render_strikeout_panel(pitcher_id, pitcher_name, proj_k, receipt, year):
             "Pitches": g.get('stat', {}).get('numberOfPitches', 0),
         } for g in reversed(p_logs[-5:])]
         st.dataframe(pd.DataFrame(log_data), hide_index=True, use_container_width=True)
+
+def render_lock(lock, shortlist, n_scanned):
+    """Render the Lock-of-the-Day card: the single best play with deep reasoning,
+    plus the top-5 shortlist."""
+    if not lock:
+        st.warning("No qualifying lock — nothing cleared the edge/confidence guardrails. "
+                   "Try again when more DraftKings lines are posted (usually a few hours pre-game).")
+        return
+
+    side, conf = lock['side'], lock['confidence']
+    emoji  = "🟢" if conf == "HIGH" else ("🟡" if conf == "MEDIUM" else "🔴")
+    price  = lock.get('price')
+    price_str = (f"+{price}" if isinstance(price, (int, float)) and price > 0 else str(price)) if price is not None else "—"
+
+    st.markdown(f"#### 🎯 Lock of the Day · {emoji} {conf} confidence")
+    st.markdown(f"## {lock['pitcher_name']} — {side} {lock['line']} Ks  ({price_str})")
+    st.caption(f"{lock.get('team_name','')} vs {lock.get('opp_team_name','')} · "
+               f"{lock.get('park_name','')} · scanned {n_scanned} priced starters")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Projection", f"{lock['projection']:.1f} Ks")
+    c2.metric("DK Line", f"{lock['line']}")
+    if lock.get('implied_prob') is not None:
+        c3.metric("Model win prob", f"{lock['model_prob']*100:.0f}%",
+                  delta=f"{(lock['model_prob']-lock['implied_prob'])*100:+.0f} pts vs book")
+    else:
+        c3.metric("Model win prob", f"{lock['model_prob']*100:.0f}%")
+    if lock.get('ev') is not None:
+        c4.metric("Edge (EV)", f"{lock['ev']*100:+.1f}%", help="Expected value per 1-unit bet")
+    else:
+        c4.metric("Edge", f"{lock['edge_k']:+.1f} K")
+
+    # Plain-English reasoning
+    reason = (f"The engine projects **{lock['projection']:.1f} Ks** against a line of "
+              f"**{lock['line']}** — {abs(lock['edge_k']):.1f} K "
+              f"{'above' if side=='Over' else 'below'} it. ")
+    if lock.get('implied_prob') is not None:
+        reason += (f"Modeled with a Poisson distribution, the **{side.lower()}** hits "
+                   f"**{lock['model_prob']*100:.0f}%** of the time vs the book's implied "
+                   f"**{lock['implied_prob']*100:.0f}%** — a {(lock['model_prob']-lock['implied_prob'])*100:+.0f}-point edge.")
+    st.markdown(f"**Why:** {reason}")
+
+    # The factor-by-factor receipt that built the projection
+    rec = lock.get('receipt', [])
+    if rec:
+        rows_html = ""
+        for label, val, detail in rec:
+            css = color_val(val)
+            rows_html += f"""
+            <div class="receipt-line">
+                <span>{html.escape(str(label))} <small style="color:#555;">({html.escape(str(detail))})</small></span>
+                <span class="{css}">{signed(val)}</span>
+            </div>"""
+        with st.expander("🧾 How the projection was built"):
+            st.markdown(f'<div style="background:#111;border-radius:6px;padding:12px 16px;">{rows_html}</div>',
+                        unsafe_allow_html=True)
+
+    if len(shortlist) > 1:
+        st.markdown("#### 📋 Top 5 edges")
+        table = [{
+            "Pitcher": c['pitcher_name'],
+            "Bet":     f"{c['side']} {c['line']}",
+            "Proj":    f"{c['projection']:.1f}",
+            "Win %":   f"{c['model_prob']*100:.0f}%",
+            "EV":      (f"{c['ev']*100:+.1f}%" if c.get('ev') is not None else "—"),
+            "Conf":    c['confidence'],
+            "Matchup": f"vs {c.get('opp_team_name','')}",
+        } for c in shortlist]
+        st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    st.caption("⚠️ Single-game strikeouts are noisy — this is the best *edge*, not a guarantee. Bet responsibly.")
 
 def _recap_model_block(label, s):
     """Render one model's last-game line (record / win% / units)."""
@@ -1213,11 +1372,12 @@ if data and data.get('totalGames', 0) > 0:
     # ============================================================
     # TABS
     # ============================================================
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔥 Offense Top Matchups",
         "⚡ Strikeout Engine",
         "📊 System Tracker",
-        "🔍 Player Deep Dive"
+        "🔍 Player Deep Dive",
+        "🎯 Lock of the Day"
     ])
 
     # ----------------------------------------------------------
@@ -1857,6 +2017,76 @@ if data and data.get('totalGames', 0) > 0:
                 })
             st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False),
                          hide_index=True, use_container_width=True)
+
+    # ----------------------------------------------------------
+    # TAB 5 — LOCK OF THE DAY (league-wide strikeout edge hunter)
+    # ----------------------------------------------------------
+    with tab5:
+        st.markdown("### 🎯 Strikeout Lock of the Day")
+        st.caption("Scans the full MLB slate, runs every probable starter through the K engine, models "
+                   "the over/under with a Poisson distribution, and ranks DraftKings lines by edge. "
+                   "Both sides · full slate · guardrails on (skips openers & thin data).")
+
+        if not ODDS_API_KEY:
+            st.warning("Add an `ODDS_API_KEY` to the app secrets to enable the Lock of the Day.")
+        else:
+            st.caption("⚠️ A scan pulls DraftKings strikeout lines for every game (~1 Odds API credit each).")
+            if st.button("🔎 Scan the slate for today's lock", type="primary", key="lock_scan"):
+                sched = get_league_schedule(date_str)
+                slate = slate_probable_pitchers(sched)
+                if not slate:
+                    st.info("No probable pitchers posted for the slate yet — check back closer to game time.")
+                else:
+                    with st.spinner(f"Pulling DraftKings strikeout lines ({len(slate)} probable starters)..."):
+                        dk = get_dk_pitcher_strikeouts()
+                    matched = [p for p in slate if normalize_name(p['pitcher_name']) in dk]
+                    if not matched:
+                        st.warning(f"Found {len(slate)} probable starters but no DraftKings strikeout lines are "
+                                   "posted yet (they usually appear a few hours before first pitch).")
+                    else:
+                        ctx = get_script_run_ctx() if get_script_run_ctx else None
+                        def _project(p):
+                            if ctx and add_script_run_ctx:
+                                add_script_run_ctx(threading.current_thread(), ctx)
+                            try:
+                                proj, receipt, meta = run_strikeout_engine(
+                                    p['pitcher_id'], p['pitcher_name'], p['opp_team_id'],
+                                    p['opp_team_name'], p['park_name'], current_year)
+                            except Exception:
+                                return None
+                            if proj is None:
+                                return None
+                            dkline = dk.get(normalize_name(p['pitcher_name']), {})
+                            return {**p, 'projection': proj, 'line': dkline.get('line'),
+                                    'over_price': dkline.get('over_price'),
+                                    'under_price': dkline.get('under_price'),
+                                    'opener': meta.get('opener', False),
+                                    'data_ok': meta.get('data_ok', True),
+                                    'receipt': receipt}
+
+                        prog = st.progress(0.0, text="Projecting starters...")
+                        cands = []
+                        with ThreadPoolExecutor(max_workers=8) as ex:
+                            futs = [ex.submit(_project, p) for p in matched]
+                            for i, f in enumerate(as_completed(futs)):
+                                prog.progress((i + 1) / len(futs), text=f"Projecting starters... {i+1}/{len(futs)}")
+                                r = f.result()
+                                if r and r.get('line') is not None:
+                                    cands.append(r)
+                        prog.empty()
+
+                        lock, shortlist = select_locks(cands, sides="both", guardrails=True, top_n=5)
+                        st.session_state['lock_result'] = {
+                            'lock': lock, 'shortlist': shortlist,
+                            'n_scanned': len(cands), 'date': date_str
+                        }
+
+            res = st.session_state.get('lock_result')
+            if res and res.get('date') == date_str:
+                st.divider()
+                render_lock(res['lock'], res['shortlist'], res['n_scanned'])
+            else:
+                st.info("Tap **Scan the slate** above to find today's lock.")
 
 else:
     st.warning("🌴 **OFF DAY:** The Reds are resting today.")
