@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import html
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -1808,6 +1809,11 @@ if data and data.get('totalGames', 0) > 0:
                 res = http_get(f"{SUPABASE_URL}/rest/v1/predictions", headers=DB_HEADERS)
                 return res.json() if res.status_code == 200 else []
 
+            @st.cache_data(ttl=300)
+            def load_pitching_predictions():
+                res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
+                return res.json() if res.status_code == 200 else []
+
             raw = load_hitting_predictions()
 
             # Quick "how did we do last game?" recap, shown above everything
@@ -1829,6 +1835,23 @@ if data and data.get('totalGames', 0) > 0:
                     st.divider()
             except Exception:
                 pass
+
+            # ---- Export your data (offline backtest / backup) ----
+            with st.expander("⬇️ Export your data (for a full backtest or backup)"):
+                st.caption("Download your saved picks as JSON. Send the hitting file to get a full "
+                           "backtest report (threshold sweep, per-model ROI), or just keep it as a backup.")
+                ec1, ec2 = st.columns(2)
+                ec1.download_button(
+                    "⬇️ Hitting picks (JSON)",
+                    data=json.dumps(raw or [], indent=2, default=str),
+                    file_name=f"hitting_predictions_{date_str}.json",
+                    mime="application/json", use_container_width=True)
+                ec2.download_button(
+                    "⬇️ Pitching projections (JSON)",
+                    data=json.dumps(load_pitching_predictions() or [], indent=2, default=str),
+                    file_name=f"pitching_predictions_{date_str}.json",
+                    mime="application/json", use_container_width=True)
+            st.divider()
 
             hit_tab, pitch_tab = st.tabs(["🔥 Hitting Tracker", "⚾ Pitching Tracker"])
             with hit_tab:
@@ -1966,11 +1989,6 @@ if data and data.get('totalGames', 0) > 0:
                         st.info("No graded hitting predictions yet.")
 
             with pitch_tab:
-                @st.cache_data(ttl=300)
-                def load_pitching_predictions():
-                    res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions", headers=DB_HEADERS)
-                    return res.json() if res.status_code == 200 else []
-
                 # Manual re-grade — covers auto-grader timing, and un-sticks any
                 # rows wrongly marked "no-result" so they get re-evaluated.
                 if st.button("🔄 Grade / re-check K projections now"):
