@@ -484,6 +484,29 @@ def get_league_hitting(year):
     except Exception:
         return {'obp': '.315', 'slg': '.400'}
 
+@st.cache_data(ttl=1800)
+def get_score_calibration():
+    """Fit P(hit)=sigmoid(a+b*score) from graded history so the value filter
+    uses an honest probability, not the overconfident raw score. None until
+    there's enough data."""
+    if not SUPABASE_URL:
+        return None
+    try:
+        res = http_get(f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.1&select=score,win",
+                       headers=DB_HEADERS)
+        rows = res.json() if res.status_code == 200 else []
+    except Exception:
+        return None
+    pairs = []
+    for r in rows:
+        try:
+            w = int(r.get('win')); s = float(r.get('score'))
+        except (TypeError, ValueError):
+            continue
+        if w in (0, 1):
+            pairs.append((s, w))
+    return fit_logistic_calibration(pairs)
+
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
@@ -1537,6 +1560,7 @@ if data and data.get('totalGames', 0) > 0:
 
                 scan_results = []
                 league_stats = get_league_hitting(current_year)
+                score_calib  = get_score_calibration()   # honest score->prob map (None if too little data)
 
                 # Opposing starter's FIP is the same for every Reds hitter — compute once.
                 opp_fip_val = 4.00
@@ -1647,11 +1671,12 @@ if data and data.get('totalGames', 0) > 0:
                     dk_info = live_odds.get(normalize_name(name), {})
 
                     # --- VALUE FILTER: does the model beat the DK price? ---
-                    # Model win prob = score/100; bet only when that exceeds the
-                    # book's implied prob (a +EV edge). This is the filter that
-                    # turned a losing card into a winner in the backtest.
-                    dk_price = dk_info.get('price') if dk_info else None
-                    value = value_metrics(total_score / 100.0, dk_price)
+                    # Use the CALIBRATED probability (learned from real hit rates),
+                    # NOT the raw score/100 — the score is a ranking and is
+                    # overconfident. Bet only when the honest prob beats the book.
+                    dk_price   = dk_info.get('price') if dk_info else None
+                    model_prob = calibrated_prob(total_score, score_calib)
+                    value = value_metrics(model_prob, dk_price) if model_prob is not None else None
 
                     # Build receipt dict for Tier 1
                     receipt = {}
@@ -1677,7 +1702,7 @@ if data and data.get('totalGames', 0) > 0:
                         "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
                         "Disagree": engines_disagree,
                         "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
-                        "Value": value
+                        "Value": value, "Model_Prob": model_prob
                     })
 
                 pb.empty()
@@ -1711,33 +1736,38 @@ if data and data.get('totalGames', 0) > 0:
                     else:
                         st.warning("⚠️ Game has already started. Predictions not saved.")
 
-                # --- 💎 VALUE PLAYS: only where the model beats the DK price ---
+                # --- 💎 VALUE PLAYS: calibrated model probability vs DK price ---
                 value_plays = sorted(
                     [r for r in scan_results if r.get('Value') and r['Value']['is_value']],
                     key=lambda r: r['Value']['ev'], reverse=True)
                 st.markdown("### 💎 Value Plays")
-                st.caption("The only bets where **your model's win % beats the DraftKings price** (positive "
-                           "expected value). In the backtest, betting *only* these returned +27% ROI vs −12% "
-                           "betting everything. If a hitter isn't here, the line is too juiced — pass.")
-                if value_plays:
-                    vrows = []
-                    for r in value_plays:
-                        v = r['Value']
-                        price = r['DK_Info'].get('price')
-                        price_str = f"+{price}" if isinstance(price, (int, float)) and price > 0 else str(price)
-                        vrows.append({
-                            "Player":   r['Player'],
-                            "Bet":      f"O {r['DK_Info'].get('line', 0.5)} ({price_str})",
-                            "Your win %":  f"{r['Score']}%",
-                            "Book implied": f"{v['implied_prob']*100:.0f}%",
-                            "Edge":     f"{v['edge']*100:+.0f} pts",
-                            "EV":       f"{v['ev']*100:+.1f}%",
-                        })
-                    st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-                    st.success(f"✅ {len(value_plays)} value play(s) found — these are the bets with a real edge.")
+                if score_calib is None:
+                    st.warning("Not enough graded history yet to **calibrate** the score into a real "
+                               "probability — so I won't pretend to judge value vs the price. The raw "
+                               "score is a ranking, not a win %. Keep logging picks; this turns on with more data.")
                 else:
-                    st.info("No value plays today — every posted line is priced above the model's number. "
-                            "The disciplined move is to **pass** (or fetch DK lines if you haven't).")
+                    st.caption("Bets where the **calibrated** model probability — learned from your *actual* "
+                               "hit rates, not the raw score — beats the DraftKings price. Heads up: these "
+                               "over-0.5-hit lines are efficiently priced, so this list is usually short or "
+                               "empty. An empty list means **pass** — that's the filter protecting you, not failing.")
+                    if value_plays:
+                        vrows = []
+                        for r in value_plays:
+                            v = r['Value']; price = r['DK_Info'].get('price')
+                            price_str = f"+{price}" if isinstance(price, (int, float)) and price > 0 else str(price)
+                            vrows.append({
+                                "Player":       r['Player'],
+                                "Bet":          f"O {r['DK_Info'].get('line', 0.5)} ({price_str})",
+                                "Model win %":  f"{r['Model_Prob']*100:.0f}%",
+                                "Book implied": f"{v['implied_prob']*100:.0f}%",
+                                "Edge":         f"{v['edge']*100:+.0f} pts",
+                                "EV":           f"{v['ev']*100:+.1f}%",
+                            })
+                        st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
+                        st.success(f"✅ {len(value_plays)} value play(s) — the model's true probability beats the price here.")
+                    else:
+                        st.info("No value plays — every posted line is priced above the model's *true* "
+                                "probability. The disciplined move is to **pass**.")
                 st.divider()
 
                 # --- Full board (all hitters, ranked) ---

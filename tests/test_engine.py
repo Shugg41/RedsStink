@@ -92,6 +92,36 @@ def test_value_metrics_garbage_model_prob():
 
 
 # ------------------------------------------------------------
+# Score calibration (Platt scaling)
+# ------------------------------------------------------------
+def test_calibration_none_without_enough_data():
+    pairs = [(80, 1), (40, 0)]   # below MIN_CALIBRATION_N
+    assert e.fit_logistic_calibration(pairs) is None
+
+def test_calibration_none_when_degenerate():
+    pairs = [(s, 1) for s in range(100)]   # all wins -> can't fit
+    assert e.fit_logistic_calibration(pairs) is None
+
+def test_calibration_is_monotonic_and_calibrated():
+    # Build data where higher score genuinely hits more, but compressed:
+    # score 80 hits 60%, score 20 hits 40%.
+    pairs = []
+    for _ in range(80):
+        pairs += [(80, 1), (80, 1), (80, 1), (80, 0), (80, 0)]   # 60%
+        pairs += [(20, 1), (20, 1), (20, 0), (20, 0), (20, 0)]   # 40%
+    calib = e.fit_logistic_calibration(pairs)
+    assert calib is not None
+    p80 = e.calibrated_prob(80, calib)
+    p20 = e.calibrated_prob(20, calib)
+    assert p80 > p20                      # monotonic
+    assert 0.5 < p80 < 0.72               # near the true 60%, NOT 0.80
+    assert 0.30 < p20 < 0.50              # near the true 40%, NOT 0.20
+
+def test_calibrated_prob_none_without_fit():
+    assert e.calibrated_prob(80, None) is None
+
+
+# ------------------------------------------------------------
 # scaled_babip_penalty
 # ------------------------------------------------------------
 def test_babip_penalty_below_threshold_is_zero():

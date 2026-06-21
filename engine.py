@@ -6,6 +6,7 @@ imported by the app, by the test suite, and by the backtest harness without
 launching the UI. All tunable weights live here so they can be swept in a
 backtest from one place.
 """
+import math
 
 # ============================================================
 # SCORING CONFIG — tune weights here
@@ -226,6 +227,56 @@ def value_metrics(model_prob, american_price):
     ev   = mp * (dec - 1.0) - (1.0 - mp)   # expected value per 1-unit bet
     return {"implied_prob": round(implied, 4), "edge": round(edge, 4),
             "ev": round(ev, 4), "is_value": edge > 0}
+
+
+# ============================================================
+# SCORE CALIBRATION (Platt scaling)
+# ============================================================
+# The 0-100 score is a ranking, NOT a probability — and it's overconfident
+# (an 85 hits ~64%, not 85%). Calibration learns P(hit) = sigmoid(a + b*score)
+# from graded history so the value filter compares HONEST probabilities to the
+# book, instead of an inflated score/100.
+MIN_CALIBRATION_N = 40   # need at least this many graded plays to trust a fit
+
+def _sigmoid(z):
+    if z < -60:
+        return 0.0
+    if z > 60:
+        return 1.0
+    return 1.0 / (1.0 + math.exp(-z))
+
+def fit_logistic_calibration(pairs, iters=4000, lr=0.3):
+    """Platt scaling via batch gradient descent. `pairs` is (score_0_100, win).
+    Returns (a, b) for P(win)=sigmoid(a + b*(score/100)), or None if too little
+    (or degenerate) data."""
+    data = [(s / 100.0, 1 if w == 1 else 0) for s, w in pairs
+            if w in (0, 1) and s is not None]
+    if len(data) < MIN_CALIBRATION_N:
+        return None
+    ys = [y for _, y in data]
+    if all(y == ys[0] for y in ys):   # all wins or all losses -> can't fit
+        return None
+    n = len(data)
+    a, b = 0.0, 1.0
+    for _ in range(iters):
+        ga = gb = 0.0
+        for x, y in data:
+            p = _sigmoid(a + b * x)
+            ga += (p - y)
+            gb += (p - y) * x
+        a -= lr * ga / n
+        b -= lr * gb / n
+    return (round(a, 4), round(b, 4))
+
+def calibrated_prob(score, calib):
+    """Honest P(hit) for a score given a fitted calibration, or None if no fit."""
+    if not calib:
+        return None
+    try:
+        a, b = calib
+        return _sigmoid(a + b * (float(score) / 100.0))
+    except (TypeError, ValueError):
+        return None
 
 
 # ============================================================
