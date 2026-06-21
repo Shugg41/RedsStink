@@ -205,6 +205,28 @@ def units_won(price, won):
     else:
         return -1.0  # lose the staked unit
 
+def value_metrics(model_prob, american_price):
+    """Compare a model win probability (0-1) to a posted price. Returns
+    {implied_prob, edge, ev, is_value} or None if there's no usable price.
+
+    This is the core of the Value Filter: a play is only worth betting when the
+    model's probability beats the book's implied probability (edge > 0). Betting
+    heavy favorites where the edge is already priced in is how you lose."""
+    if american_price is None:
+        return None
+    try:
+        mp = float(model_prob)
+    except (TypeError, ValueError):
+        return None
+    implied = american_to_implied_prob(american_price)
+    if implied <= 0:
+        return None
+    dec  = american_to_decimal(american_price)
+    edge = mp - implied
+    ev   = mp * (dec - 1.0) - (1.0 - mp)   # expected value per 1-unit bet
+    return {"implied_prob": round(implied, 4), "edge": round(edge, 4),
+            "ev": round(ev, 4), "is_value": edge > 0}
+
 
 # ============================================================
 # SMALL-SAMPLE GATING

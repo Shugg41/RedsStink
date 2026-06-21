@@ -62,6 +62,36 @@ def test_units_won():
 
 
 # ------------------------------------------------------------
+# value_metrics — the Value Filter (+EV detection)
+# ------------------------------------------------------------
+def test_value_metrics_none_without_price():
+    assert e.value_metrics(0.7, None) is None
+
+def test_value_metrics_flags_positive_edge():
+    # Model 70% on a +100 line (book implies 50%) -> clear value
+    v = e.value_metrics(0.70, 100)
+    assert v["is_value"] is True
+    assert v["edge"] == pytest.approx(0.20)
+    assert v["ev"] > 0
+
+def test_value_metrics_rejects_overpriced_favorite():
+    # Model 60% but the book charges -200 (implies 66.7%) -> NOT value
+    v = e.value_metrics(0.60, -200)
+    assert v["is_value"] is False
+    assert v["edge"] < 0
+    assert v["ev"] < 0
+
+def test_value_metrics_break_even_is_not_value():
+    # Model exactly equals implied -> edge 0, not a value play
+    v = e.value_metrics(0.5, 100)
+    assert v["edge"] == pytest.approx(0.0)
+    assert v["is_value"] is False
+
+def test_value_metrics_garbage_model_prob():
+    assert e.value_metrics("x", -110) is None
+
+
+# ------------------------------------------------------------
 # scaled_babip_penalty
 # ------------------------------------------------------------
 def test_babip_penalty_below_threshold_is_zero():
