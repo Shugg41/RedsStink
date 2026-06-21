@@ -484,29 +484,6 @@ def get_league_hitting(year):
     except Exception:
         return {'obp': '.315', 'slg': '.400'}
 
-@st.cache_data(ttl=1800)
-def get_score_calibration():
-    """Fit P(hit)=sigmoid(a+b*score) from graded history so the value filter
-    uses an honest probability, not the overconfident raw score. None until
-    there's enough data."""
-    if not SUPABASE_URL:
-        return None
-    try:
-        res = http_get(f"{SUPABASE_URL}/rest/v1/predictions?graded=eq.1&select=score,win",
-                       headers=DB_HEADERS)
-        rows = res.json() if res.status_code == 200 else []
-    except Exception:
-        return None
-    pairs = []
-    for r in rows:
-        try:
-            w = int(r.get('win')); s = float(r.get('score'))
-        except (TypeError, ValueError):
-            continue
-        if w in (0, 1):
-            pairs.append((s, w))
-    return fit_logistic_calibration(pairs)
-
 @st.cache_data(ttl=3600)
 def get_schedule(date_str):
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
@@ -787,13 +764,13 @@ def get_draftkings_odds():
             st.warning("No Reds game found on the odds provider's slate for today.")
             return {}
 
-        # --- Step 2: pull batter_hits for the Reds event (1 credit) ---
+        # --- Step 2: pull batter_hits + HRR for the Reds event (one request) ---
         o_res = http_get(
             f"{base}/events/{reds_event_id}/odds",
             params={
                 "apiKey": ODDS_API_KEY,
                 "regions": "us",
-                "markets": "batter_hits",
+                "markets": "batter_hits,batter_hits_runs_rbis",
                 "bookmakers": "draftkings",
                 "oddsFormat": "american",
             }
@@ -806,15 +783,22 @@ def get_draftkings_odds():
         game = o_res.json()
         for book in game.get('bookmakers', []):
             for market in book.get('markets', []):
-                if market['key'] == 'batter_hits':
-                    for outcome in market.get('outcomes', []):
-                        if outcome.get('name') == 'Over':
-                            odds_dict[normalize_name(outcome.get('description', ''))] = {
-                                'line':  outcome.get('point', 0.5),
-                                'price': outcome.get('price', 0)
-                            }
+                mkey = market.get('key')
+                if mkey not in ('batter_hits', 'batter_hits_runs_rbis'):
+                    continue
+                for outcome in market.get('outcomes', []):
+                    if outcome.get('name') != 'Over':
+                        continue
+                    nm  = normalize_name(outcome.get('description', ''))
+                    rec = odds_dict.setdefault(nm, {})
+                    if mkey == 'batter_hits':
+                        rec['line']  = outcome.get('point', 0.5)
+                        rec['price'] = outcome.get('price', 0)
+                    else:  # batter_hits_runs_rbis
+                        rec['hrr_line']  = outcome.get('point', 0.5)
+                        rec['hrr_price'] = outcome.get('price', 0)
         if not odds_dict:
-            st.warning("Found the Reds game, but no DraftKings batter-hits lines are posted yet (often not until a few hours before first pitch).")
+            st.warning("Found the Reds game, but no DraftKings batter lines are posted yet (often not until a few hours before first pitch).")
         return odds_dict
     except Exception as e:
         st.error(f"Odds API error: {str(e)}")
@@ -981,12 +965,16 @@ def render_player_card(row, split_label, idx):
         badge_cls  = "tier3-badge"
         badge_text = "TIER 3 🔴"
 
-    dk_info = row.get('DK_Info', {})
-    if dk_info:
-        price_str = f"+{dk_info['price']}" if dk_info['price'] > 0 else str(dk_info['price'])
-        dk_html = f'<span class="dk-badge">DK: O {dk_info["line"]} ({price_str})</span>'
-    else:
-        dk_html = '<span class="dk-badge no-odds">No DK Line</span>'
+    dk_info = row.get('DK_Info', {}) or {}
+    badges = []
+    if dk_info.get('price') is not None and dk_info.get('line') is not None:
+        p = dk_info['price']; ps = f"+{p}" if p > 0 else str(p)
+        badges.append(f'<span class="dk-badge">DK Hits: O {dk_info["line"]} ({ps})</span>')
+    if dk_info.get('hrr_price') is not None and dk_info.get('hrr_line') is not None:
+        hp = dk_info['hrr_price']; hps = f"+{hp}" if hp > 0 else str(hp)
+        plus = int(dk_info['hrr_line'] + 0.5)   # O/U line -> "X+" framing (O 1.5 = 2+ HRR)
+        badges.append(f'<span class="dk-badge" style="background:#5a2d8a;">DK HRR: {plus}+ ({hps})</span>')
+    dk_html = " ".join(badges) if badges else '<span class="dk-badge no-odds">No DK Line</span>'
 
     bvp_display = f"{row['BVP_Avg']:.3f}" if row['BVP_Avg'] > 0 else "—"
 
@@ -999,20 +987,13 @@ def render_player_card(row, split_label, idx):
         mult_chip = f'<span class="mult-chip">MULT: {mult_score} {m_emoji}</span>'
     disagree_flag = '<span class="disagree-flag">⚠ engines differ</span>' if row.get('Disagree') else ""
 
-    # 💎 Value badge — model beats the DK price (the only bets worth making)
-    val = row.get('Value')
-    value_chip = ""
-    if val and val.get('is_value'):
-        value_chip = (f'<span class="dk-badge" style="background:#1a3a1a;color:#4caf50;">'
-                      f'💎 VALUE {val["ev"]*100:+.0f}% EV</span>')
-
     st.markdown(f"""
     <div class="{card_cls}">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
             <div style="display:flex; align-items:center; gap:12px;">
                 <span class="player-score">{row['Score']}</span>
                 <div>
-                    <p class="player-name">#{idx} {html.escape(str(row['Player']))} {mult_chip}{disagree_flag}{value_chip}</p>
+                    <p class="player-name">#{idx} {html.escape(str(row['Player']))} {mult_chip}{disagree_flag}</p>
                     <span class="tier-badge {badge_cls}">{badge_text}</span>
                 </div>
             </div>
@@ -1560,7 +1541,6 @@ if data and data.get('totalGames', 0) > 0:
 
                 scan_results = []
                 league_stats = get_league_hitting(current_year)
-                score_calib  = get_score_calibration()   # honest score->prob map (None if too little data)
 
                 # Opposing starter's FIP is the same for every Reds hitter — compute once.
                 opp_fip_val = 4.00
@@ -1670,14 +1650,6 @@ if data and data.get('totalGames', 0) > 0:
 
                     dk_info = live_odds.get(normalize_name(name), {})
 
-                    # --- VALUE FILTER: does the model beat the DK price? ---
-                    # Use the CALIBRATED probability (learned from real hit rates),
-                    # NOT the raw score/100 — the score is a ranking and is
-                    # overconfident. Bet only when the honest prob beats the book.
-                    dk_price   = dk_info.get('price') if dk_info else None
-                    model_prob = calibrated_prob(total_score, score_calib)
-                    value = value_metrics(model_prob, dk_price) if model_prob is not None else None
-
                     # Build receipt dict for Tier 1
                     receipt = {}
                     if total_score >= TIER1_THRESHOLD:
@@ -1701,8 +1673,7 @@ if data and data.get('totalGames', 0) > 0:
                         "Mult_Score": mult_score, "Mult_Tier": mult_tier,
                         "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
                         "Disagree": engines_disagree,
-                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
-                        "Value": value, "Model_Prob": model_prob
+                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val
                     })
 
                 pb.empty()
@@ -1736,43 +1707,8 @@ if data and data.get('totalGames', 0) > 0:
                     else:
                         st.warning("⚠️ Game has already started. Predictions not saved.")
 
-                # --- 💎 VALUE PLAYS: calibrated model probability vs DK price ---
-                value_plays = sorted(
-                    [r for r in scan_results if r.get('Value') and r['Value']['is_value']],
-                    key=lambda r: r['Value']['ev'], reverse=True)
-                st.markdown("### 💎 Value Plays")
-                if score_calib is None:
-                    st.warning("Not enough graded history yet to **calibrate** the score into a real "
-                               "probability — so I won't pretend to judge value vs the price. The raw "
-                               "score is a ranking, not a win %. Keep logging picks; this turns on with more data.")
-                else:
-                    st.caption("Bets where the **calibrated** model probability — learned from your *actual* "
-                               "hit rates, not the raw score — beats the DraftKings price. Heads up: these "
-                               "over-0.5-hit lines are efficiently priced, so this list is usually short or "
-                               "empty. An empty list means **pass** — that's the filter protecting you, not failing.")
-                    if value_plays:
-                        vrows = []
-                        for r in value_plays:
-                            v = r['Value']; price = r['DK_Info'].get('price')
-                            price_str = f"+{price}" if isinstance(price, (int, float)) and price > 0 else str(price)
-                            vrows.append({
-                                "Player":       r['Player'],
-                                "Bet":          f"O {r['DK_Info'].get('line', 0.5)} ({price_str})",
-                                "Model win %":  f"{r['Model_Prob']*100:.0f}%",
-                                "Book implied": f"{v['implied_prob']*100:.0f}%",
-                                "Edge":         f"{v['edge']*100:+.0f} pts",
-                                "EV":           f"{v['ev']*100:+.1f}%",
-                            })
-                        st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-                        st.success(f"✅ {len(value_plays)} value play(s) — the model's true probability beats the price here.")
-                    else:
-                        st.info("No value plays — every posted line is priced above the model's *true* "
-                                "probability. The disciplined move is to **pass**.")
-                st.divider()
-
-                # --- Full board (all hitters, ranked) ---
+                # --- Board (all hitters, ranked) ---
                 if scan_results:
-                    st.markdown("### 🏆 Full Board")
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
                     for idx_c, (_, row) in enumerate(df.iterrows(), start=1):
                         render_player_card(row, split_label, idx_c)
