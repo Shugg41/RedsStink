@@ -987,6 +987,26 @@ def render_player_card(row, split_label, idx):
         mult_chip = f'<span class="mult-chip">MULT: {mult_score} {m_emoji}</span>'
     disagree_flag = '<span class="disagree-flag">⚠ engines differ</span>' if row.get('Disagree') else ""
 
+    # 🎯 HRR (hits+runs+RBI) readout: projection, model P(2+), and the DK 2+ line
+    hrr_html = ""
+    if row.get('HRR_Proj') is not None:
+        p2 = row.get('HRR_P2')
+        p2_str = f"{p2*100:.0f}%" if p2 is not None else "—"
+        dk_hrr_bit = ""
+        if dk_info.get('hrr_price') is not None and dk_info.get('hrr_line') is not None:
+            hp = dk_info['hrr_price']; hps = f"+{hp}" if hp > 0 else str(hp)
+            plus = int(dk_info['hrr_line'] + 0.5)
+            imp = american_to_implied_prob(hp)
+            edge = ""
+            if p2 is not None and imp > 0:
+                d = (p2 - imp) * 100
+                col = "#4caf50" if d > 0 else "#888"
+                edge = f' &nbsp;<span style="color:{col};">({d:+.0f} vs book)</span>'
+            dk_hrr_bit = f' &nbsp;|&nbsp; <span>DK {plus}+</span>: {hps}{edge}'
+        hrr_html = (f'<div class="stat-row" style="margin-top:6px;color:#9b7fff;">'
+                    f'<span>🎯 Proj HRR</span>: {row["HRR_Proj"]} &nbsp;|&nbsp; '
+                    f'<span>Model P(2+)</span>: {p2_str}{dk_hrr_bit}</div>')
+
     st.markdown(f"""
     <div class="{card_cls}">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
@@ -1007,6 +1027,7 @@ def render_player_card(row, split_label, idx):
             <span>L10 Hits/G</span>: {row['L10_Hits']} &nbsp;|&nbsp;
             <span>L10 HRR/G</span>: {row['L10_HRR']}
         </div>
+        {hrr_html}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1561,6 +1582,10 @@ if data and data.get('totalGames', 0) > 0:
                         [pid for _, pid in to_score], current_year, split_code, opp_pitcher_id
                     )
 
+                # Bullpen ERA is the same for every Reds hitter — pull once for HRR.
+                try:    bullpen_era = float(opp_bullpen.get('era', 4.0) or 4.0)
+                except Exception: bullpen_era = 4.0
+
                 pb = st.progress(0, text="Scoring roster...")
                 n_score = max(1, len(to_score))
                 for i, (name, p_id) in enumerate(to_score):
@@ -1576,6 +1601,7 @@ if data and data.get('totalGames', 0) > 0:
                     # L10 form
                     hit_games, l10_total, l10_h_avg, l10_hrr_avg = 0, 0, 0.0, 0.0
                     logs = blob.get('logs') or []
+                    season_hrr_pg = 0.0
                     if logs:
                         l10       = logs[-10:]
                         l10_total = len(l10)
@@ -1583,6 +1609,8 @@ if data and data.get('totalGames', 0) > 0:
                         if l10_total > 0:
                             l10_h_avg   = round(sum(g.get('stat', {}).get('hits', 0) for g in l10) / l10_total, 1)
                             l10_hrr_avg = round(sum((g['stat'].get('hits', 0) + g['stat'].get('runs', 0) + g['stat'].get('rbi', 0)) for g in l10) / l10_total, 1)
+                        # Season HRR/game = stable base rate for the HRR projection
+                        season_hrr_pg = round(sum((g['stat'].get('hits', 0) + g['stat'].get('runs', 0) + g['stat'].get('rbi', 0)) for g in logs) / len(logs), 2)
 
                     overall_avg, ops_plus, babip = ".000", "N/A", ".000"
                     k_pct_val, iso_val = 0.22, 0.140
@@ -1663,6 +1691,11 @@ if data and data.get('totalGames', 0) > 0:
                             f"BABIP Guardrail (scaled)":               penalty,
                         }
 
+                    # --- HRR engine: projected hits+runs+RBI and P(2+) ---
+                    hrr_proj = project_hrr(season_hrr_pg, l10_hrr_avg, idx_pos,
+                                           opp_fip_val, bullpen_era, park_name)
+                    hrr_p2   = prob_2plus_hrr(hrr_proj)
+
                     scan_results.append({
                         "Player": name, "Player_ID": p_id, "Tier": tier, "Score": total_score,
                         "Avg": overall_avg, "Raw_OPS": split_ops, "L10_HRR": l10_hrr_avg,
@@ -1673,7 +1706,8 @@ if data and data.get('totalGames', 0) > 0:
                         "Mult_Score": mult_score, "Mult_Tier": mult_tier,
                         "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
                         "Disagree": engines_disagree,
-                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val
+                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
+                        "HRR_Proj": hrr_proj, "HRR_P2": hrr_p2
                     })
 
                 pb.empty()

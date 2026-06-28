@@ -308,6 +308,45 @@ def test_stable_ip_fixes_underprojection():
 
 
 # ------------------------------------------------------------
+# HRR engine
+# ------------------------------------------------------------
+def test_poisson_at_least_basics():
+    assert e.poisson_at_least(0, 2.0) == 1.0
+    assert e.poisson_at_least(2, 0.0) == 0.0
+    # P(>=2 | lam=2) = 1 - e^-2(1+2) ≈ 0.594
+    assert e.poisson_at_least(2, 2.0) == pytest.approx(0.5940, abs=1e-3)
+
+def test_prob_2plus_more_likely_with_higher_projection():
+    assert e.prob_2plus_hrr(2.4) > e.prob_2plus_hrr(1.4)
+
+def test_project_hrr_blends_season_and_recent():
+    # Neutral context -> projection sits between season and L10 base
+    p = e.project_hrr(2.0, 1.0, lineup_pos=4, opp_fip=4.0, bullpen_era=4.0, park_name="")
+    assert 1.0 < p < 2.0
+
+def test_project_hrr_lineup_top_beats_bottom():
+    top = e.project_hrr(1.8, 1.8, lineup_pos=0)
+    bot = e.project_hrr(1.8, 1.8, lineup_pos=8)
+    assert top > bot
+
+def test_project_hrr_weak_pitcher_and_hitter_park_raise_it():
+    soft = e.project_hrr(1.8, 1.8, lineup_pos=3, opp_fip=5.5, bullpen_era=5.0,
+                         park_name="Great American Ball Park")
+    tough = e.project_hrr(1.8, 1.8, lineup_pos=3, opp_fip=2.8, bullpen_era=3.0,
+                          park_name="Oracle Park")
+    assert soft > tough
+
+def test_project_hrr_clamps_the_swing():
+    # Extreme inputs can't blow the multiplier past the ceiling
+    p = e.project_hrr(2.0, 2.0, lineup_pos=0, opp_fip=9.0, bullpen_era=9.0,
+                      park_name="Great American Ball Park")
+    assert p <= 2.0 * e.HRR_MOD_CEIL + 1e-9
+
+def test_project_hrr_falls_back_without_logs():
+    assert e.project_hrr(0, 0) == pytest.approx(e.HRR_DEFAULT_PG, abs=0.4)
+
+
+# ------------------------------------------------------------
 # run_multiplicative_engine
 # ------------------------------------------------------------
 def _base_inputs(**over):
