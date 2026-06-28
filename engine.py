@@ -173,6 +173,60 @@ def base_k_projection(k9, expected_ip):
 
 
 # ============================================================
+# HRR ENGINE — hits + runs + RBI (the 2+ / over-1.5 market)
+# ============================================================
+HRR_W_SEASON  = 0.6     # lean on the stable season rate...
+HRR_W_L10     = 0.4     # ...nudged by recent form
+HRR_MOD_FLOOR = 0.80    # clamp the combined context multiplier
+HRR_MOD_CEIL  = 1.25
+HRR_DEFAULT_PG = 1.6    # league-ish HRR/game fallback when there's no log data
+
+def poisson_at_least(n, lam):
+    """P(X >= n) for X ~ Poisson(lam). Used for P(2+ HRR)."""
+    if n <= 0:
+        return 1.0
+    if lam <= 0:
+        return 0.0
+    cdf = term = math.exp(-lam)          # pmf(0)
+    for k in range(1, n):                # add pmf(1)..pmf(n-1)
+        term *= lam / k
+        cdf += term
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+def project_hrr(season_hrr_pg, l10_hrr_pg, lineup_pos=None,
+                opp_fip=4.0, bullpen_era=4.0, park_name=""):
+    """Projected hits+runs+RBI for one game. Blends the stable season rate with
+    recent form, then nudges for run environment — lineup spot (runs/RBI depend
+    on who hits around you), opposing starter FIP, bullpen, and park — with the
+    swing clamped so no single factor runs away."""
+    s = _safe_float(season_hrr_pg)
+    l = _safe_float(l10_hrr_pg)
+    if s > 0 and l > 0:
+        base = HRR_W_SEASON * s + HRR_W_L10 * l
+    else:
+        base = s or l or HRR_DEFAULT_PG
+
+    fip_mod  = 1.0 + (_safe_float(opp_fip, 4.0)     - 4.0) * 0.05   # worse pitcher -> more offense
+    bull_mod = 1.0 + (_safe_float(bullpen_era, 4.0) - 4.0) * 0.02
+    park_mod = 1.05 if park_name in HITTER_PARKS else (0.95 if park_name in PITCHER_PARKS else 1.0)
+    if lineup_pos is None:
+        line_mod = 1.0
+    elif lineup_pos <= 2:
+        line_mod = 1.06     # top of order: more PAs + scores more
+    elif lineup_pos >= 6:
+        line_mod = 0.92     # bottom: fewer chances
+    else:
+        line_mod = 1.0
+
+    mod = max(HRR_MOD_FLOOR, min(HRR_MOD_CEIL, fip_mod * bull_mod * park_mod * line_mod))
+    return round(max(0.0, base * mod), 2)
+
+def prob_2plus_hrr(projection):
+    """P(2+ HRR) — i.e. clearing an over-1.5 line — under Poisson(projection)."""
+    return round(poisson_at_least(2, _safe_float(projection)), 4)
+
+
+# ============================================================
 # ODDS MATH
 # ============================================================
 def american_to_decimal(price):
