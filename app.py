@@ -42,6 +42,10 @@ try:
     import briefing
 except Exception:  # stale module during a deploy — the robot just skips a day
     briefing = None
+try:
+    import savant
+except Exception:  # Statcast is an enhancement, never a dependency
+    savant = None
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -492,6 +496,11 @@ get_game_logs        = st.cache_data(ttl=3600)(data.get_game_logs)
 get_pitcher_hand     = st.cache_data(ttl=86400)(data.get_pitcher_hand)
 get_league_schedule  = st.cache_data(ttl=1800)(data.get_league_schedule)
 
+if savant is not None:
+    get_savant_batters = st.cache_data(ttl=86400)(savant.fetch_batter_quality)
+else:
+    def get_savant_batters(year): return {}
+
 class _CachedFetch:
     """Namespace handing the pipeline the CACHED fetchers (interactive path)."""
     get_league_hitting   = staticmethod(lambda *a, **k: get_league_hitting(*a, **k))
@@ -605,6 +614,14 @@ def render_player_card(row, split_label, idx):
 
     bvp_display = f"{row['BVP_Avg']:.3f}" if row['BVP_Avg'] > 0 else "—"
 
+    # Statcast luck read: xBA vs AVG (▲ unlucky = deserves better, ▼ = hot-lucky)
+    xba_bit = ""
+    if row.get('xBA') is not None:
+        tag = row.get('Luck')
+        tag_html = {"unlucky":   ' <span style="color:#4caf50;">▲ unlucky</span>',
+                    "hot-lucky": ' <span style="color:#e6a817;">▼ hot-lucky</span>'}.get(tag, "")
+        xba_bit = f' &nbsp;|&nbsp; <span>xBA</span>: {row["xBA"]:.3f}{tag_html}'
+
     # Dual-engine display: multiplicative score chip + disagreement flag
     mult_score = row.get('Mult_Score')
     mult_tier  = row.get('Mult_Tier', '')
@@ -652,7 +669,7 @@ def render_player_card(row, split_label, idx):
             <span>OPS vs {split_label}</span>: {row['OPS_Display']} &nbsp;|&nbsp;
             <span>BvP</span>: {bvp_display} &nbsp;|&nbsp;
             <span>L10 Hits/G</span>: {row['L10_Hits']} &nbsp;|&nbsp;
-            <span>L10 HRR/G</span>: {row['L10_HRR']}
+            <span>L10 HRR/G</span>: {row['L10_HRR']}{xba_bit}
         </div>
         {hrr_html}
     </div>
@@ -1236,13 +1253,18 @@ if data and data.get('totalGames', 0) > 0:
                 try:    bullpen_era = float(opp_bullpen.get('era', 4.0) or 4.0)
                 except Exception: bullpen_era = 4.0
 
+                # Statcast expected stats (free, cached daily; degrades to {} on failure)
+                sv_batters = get_savant_batters(current_year)
+                if sv_batters:
+                    st.caption(f"⚾ Statcast loaded: xBA/xwOBA + barrels for {len(sv_batters)} MLB hitters")
+
                 pb = st.progress(0, text=f"Scoring {len(to_score)} hitters...")
                 scan_results = pipeline.score_hitters(
                     FETCH, to_score, current_year, split_code, split_label,
                     reds_batting_order, park_name, pitcher_score, opp_fip_val,
                     bullpen_era, live_odds, opp_pitcher_id,
                     progress_cb=lambda frac, nm: pb.progress(frac, text=f"Scoring {nm}..."),
-                    thread_hook=_st_thread_hook)
+                    thread_hook=_st_thread_hook, savant_batters=sv_batters)
                 pb.empty()
 
                 # --- Save to Supabase (UPSERT w/ odds at pick time) ---
