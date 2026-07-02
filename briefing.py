@@ -24,6 +24,11 @@ MARKER_PLAYER_ID = 0
 MARKER_NAME = "_autorun"
 AUTORUN_HOUR_ET = 9   # don't run before 9am ET (probables usually posted by then)
 
+# Closing-line snapshot (CLV): a second, separate marker — same player_id 0
+# but game_pk=1 so the (date, player_id, game_pk) unique key keeps them apart.
+CLOSE_MARKER_GAME_PK = 1
+CLOSE_HOUR_ET = 17    # capture near-close odds on the first visit after 5pm ET
+
 
 # ============================================================
 # COMPOSE (pure — tested)
@@ -75,23 +80,24 @@ def compose_briefing(ctx, scan_results, k_projections, odds_found):
 # ============================================================
 # AUTO-RUN ORCHESTRATION (background thread; raw data module, no Streamlit)
 # ============================================================
-def _marker_exists(supabase_url, db_headers, date_str):
+def _marker_exists(supabase_url, db_headers, date_str, game_pk=0):
     try:
         res = data.http_get(
             f"{supabase_url}/rest/v1/predictions"
-            f"?date=eq.{date_str}&player_id=eq.{MARKER_PLAYER_ID}&select=player_id&limit=1",
+            f"?date=eq.{date_str}&player_id=eq.{MARKER_PLAYER_ID}&game_pk=eq.{game_pk}"
+            f"&select=player_id&limit=1",
             headers=db_headers)
         return res.status_code == 200 and bool(res.json())
     except Exception:
         return True   # on doubt, do nothing (fail quiet, no spam)
 
-def _claim_marker(supabase_url, db_headers, date_str):
-    """Atomically claim today's auto-run via plain insert (409 = already ran)."""
+def _claim_marker(supabase_url, db_headers, date_str, game_pk=0, name=MARKER_NAME):
+    """Atomically claim a daily job via plain insert (409 = already claimed)."""
     try:
         res = data.http_post(
             f"{supabase_url}/rest/v1/predictions",
             json=[{"date": date_str, "player_id": MARKER_PLAYER_ID,
-                   "player_name": MARKER_NAME, "game_pk": 0,
+                   "player_name": name, "game_pk": game_pk,
                    "score": 0, "tier": "", "opp_pitcher": "",
                    "actual_hits": 0, "actual_hrr": 0, "graded": -1, "win": -1}],
             headers=db_headers)
@@ -208,3 +214,62 @@ def daily_autorun(supabase_url, db_headers, db_headers_upsert,
         return text
     except Exception:
         return None   # never let the robot take anything down
+
+
+# ============================================================
+# CLOSING-LINE SNAPSHOT (CLV groundwork)
+# ============================================================
+def should_close_snapshot(now_et, close_marker_exists, morning_ran, ctx):
+    """Pure gate for the near-close odds capture: evening, still pregame, the
+    morning picks exist, and it hasn't run yet today."""
+    if now_et.hour < CLOSE_HOUR_ET:
+        return False
+    if close_marker_exists or not morning_ran:
+        return False
+    if not ctx or not ctx.get('is_pregame'):
+        return False
+    return True
+
+def closing_snapshot(supabase_url, db_headers, db_headers_upsert, odds_api_key):
+    """Capture near-close odds onto today's saved picks (closing_line /
+    closing_price columns). If the database doesn't have those columns yet,
+    this quietly does nothing — see README for the one-line SQL to enable it."""
+    try:
+        now = data.now_eastern()
+        date_str = now.strftime("%Y-%m-%d")
+        ctx = pipeline.game_context(data, date_str)
+        morning = _marker_exists(supabase_url, db_headers, date_str, game_pk=0)
+        closed  = _marker_exists(supabase_url, db_headers, date_str,
+                                 game_pk=CLOSE_MARKER_GAME_PK)
+        if not should_close_snapshot(now, closed, morning, ctx):
+            return False
+        if not _claim_marker(supabase_url, db_headers, date_str,
+                             game_pk=CLOSE_MARKER_GAME_PK, name="_close"):
+            return False
+
+        odds, _msgs = data.fetch_reds_batter_odds(odds_api_key)
+        if not odds:
+            return False
+        # fetch today's saved picks, patch each with its closing line
+        res = data.http_get(
+            f"{supabase_url}/rest/v1/predictions?date=eq.{date_str}"
+            f"&player_id=gt.0&select=player_id,player_name", headers=db_headers)
+        rows = res.json() if res.status_code == 200 else []
+        from engine import normalize_name
+        patched = 0
+        for r in rows:
+            rec = odds.get(normalize_name(r.get('player_name', '')))
+            if not rec or rec.get('price') is None:
+                continue
+            pr = data.http_patch(
+                f"{supabase_url}/rest/v1/predictions"
+                f"?date=eq.{date_str}&player_id=eq.{r['player_id']}",
+                json={"closing_line": rec.get('line'), "closing_price": rec.get('price')},
+                headers=db_headers)
+            if pr.status_code in (200, 204):
+                patched += 1
+            else:
+                return False   # columns missing -> dormant until the SQL is run
+        return patched > 0
+    except Exception:
+        return False
