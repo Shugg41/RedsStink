@@ -173,6 +173,45 @@ def base_k_projection(k9, expected_ip):
 
 
 # ============================================================
+# STATCAST EXPECTED-STATS HELPERS (xBA is the honest luck detector)
+# ============================================================
+XSTAT_LUCK_GAP  = 0.020   # |xBA - BA| beyond this = meaningful luck signal
+XSTAT_MOD_FLOOR = 0.90    # clamp on the xstats HRR modifier
+XSTAT_MOD_CEIL  = 1.10
+LEAGUE_BRL_PCT  = 6.0     # rough league-average barrel%
+
+def xba_luck_read(ba, xba):
+    """Classify a hitter's luck from BA vs expected BA.
+    Returns (tag, delta) — tag in {'unlucky', 'hot-lucky', 'fair'} — or None."""
+    ba, xba = _safe_float(ba, -1), _safe_float(xba, -1)
+    if ba < 0 or xba < 0:
+        return None
+    delta = round(xba - ba, 3)
+    if delta >= XSTAT_LUCK_GAP:
+        return ("unlucky", delta)      # deserves better -> positive regression
+    if delta <= -XSTAT_LUCK_GAP:
+        return ("hot-lucky", delta)    # overperforming -> due to cool off
+    return ("fair", delta)
+
+def xstats_hit_modifier(ba, xba):
+    """Clamped multiplier nudging projections toward DESERVED performance:
+    an unlucky .240/.290x hitter gets a boost, a lucky one gets shaved."""
+    read = xba_luck_read(ba, xba)
+    if read is None:
+        return 1.0
+    _, delta = read
+    return max(XSTAT_MOD_FLOOR, min(XSTAT_MOD_CEIL, 1.0 + delta * 1.5))
+
+def barrel_hrr_boost(brl_percent):
+    """Small clamped multiplier for real power quality (barrels/BBE %).
+    A HR is 3 HRR in one swing, so barrel rate matters more to HRR than AVG."""
+    b = _safe_float(brl_percent, -1)
+    if b < 0:
+        return 1.0
+    return max(0.95, min(1.08, 1.0 + (b - LEAGUE_BRL_PCT) * 0.008))
+
+
+# ============================================================
 # HRR ENGINE — hits + runs + RBI (the 2+ / over-1.5 market)
 # ============================================================
 HRR_W_SEASON  = 0.6     # lean on the stable season rate...

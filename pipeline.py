@@ -13,6 +13,7 @@ from engine import (
     split_ops_points, bvp_bonus_points, scaled_babip_penalty,
     run_multiplicative_engine, project_hrr, prob_2plus_hrr,
     ip_per_start, expected_starter_ip, is_likely_opener, base_k_projection,
+    xba_luck_read, xstats_hit_modifier, barrel_hrr_boost,
     WEIGHT_CONSISTENCY, WEIGHT_HRR, LINEUP_TOP_BONUS, LINEUP_BOT_PENALTY,
     TIER1_THRESHOLD, TIER2_THRESHOLD,
     SK_FORM_ADJ_MAX, SK_SWSTR_BONUS, SK_OPP_K_BONUS, SK_WHIP_ADJ, SK_PARK_K_ADJ,
@@ -110,9 +111,12 @@ def parallel_prefetch(fetch, player_ids, year, split_code, opp_pitcher_id,
 def score_hitters(fetch, to_score, year, split_code, split_label,
                   batting_order, park_name, pitcher_score, opp_fip_val,
                   bullpen_era, live_odds, opp_pitcher_id,
-                  progress_cb=None, thread_hook=None):
+                  progress_cb=None, thread_hook=None, savant_batters=None):
     """Score a list of (name, player_id) hitters. Returns scan_results rows —
-    the same dict shape the app renders and saves."""
+    the same dict shape the app renders and saves. savant_batters (optional)
+    is {player_id: {'ba','xba','brl_percent',...}} from savant.py — when
+    present, xBA drives a luck read and nudges the HRR projection toward
+    deserved performance."""
     league_stats = fetch.get_league_hitting(year)
     prefetched = parallel_prefetch(fetch, [pid for _, pid in to_score], year,
                                    split_code, opp_pitcher_id, thread_hook=thread_hook)
@@ -222,9 +226,16 @@ def score_hitters(fetch, to_score, year, split_code, split_label,
                 "BABIP Guardrail (scaled)":               penalty,
             }
 
+        # --- Statcast xstats: luck read + deserved-performance nudge ---
+        sv = (savant_batters or {}).get(p_id) or {}
+        luck = xba_luck_read(sv.get('ba'), sv.get('xba'))
+        x_mod = xstats_hit_modifier(sv.get('ba'), sv.get('xba')) \
+                * barrel_hrr_boost(sv.get('brl_percent'))
+
         # --- HRR engine: projected hits+runs+RBI and P(2+) ---
         hrr_proj = project_hrr(season_hrr_pg, l10_hrr_avg, idx_pos,
                                opp_fip_val, bullpen_era, park_name)
+        hrr_proj = round(hrr_proj * x_mod, 2)
         hrr_p2   = prob_2plus_hrr(hrr_proj)
 
         scan_results.append({
@@ -237,7 +248,9 @@ def score_hitters(fetch, to_score, year, split_code, split_label,
             "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
             "Disagree": engines_disagree,
             "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
-            "HRR_Proj": hrr_proj, "HRR_P2": hrr_p2
+            "HRR_Proj": hrr_proj, "HRR_P2": hrr_p2,
+            "xBA": sv.get('xba'), "Luck": (luck[0] if luck else None),
+            "Luck_Delta": (luck[1] if luck else None), "Brl_Pct": sv.get('brl_percent')
         })
 
     return scan_results
