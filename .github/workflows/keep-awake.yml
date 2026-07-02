@@ -1,9 +1,8 @@
 # Pings the Streamlit app on a schedule so Community Cloud never puts it to
 # sleep — cold "waking up..." loads were taking 30-60s+.
 #
-# Setup: set the APP_URL repository variable to the app's public URL
-# (GitHub repo -> Settings -> Secrets and variables -> Actions -> Variables).
-# Until it's set, runs are skipped harmlessly.
+# The APP_URL repository variable (Settings -> Secrets and variables ->
+# Actions -> Variables) overrides the default below if the app ever moves.
 name: Keep app awake
 
 on:
@@ -17,12 +16,8 @@ jobs:
     steps:
       - name: Visit the app
         env:
-          APP_URL: ${{ vars.APP_URL }}
+          APP_URL: ${{ vars.APP_URL || 'https://redsstink1.streamlit.app' }}
         run: |
-          if [ -z "$APP_URL" ]; then
-            echo "APP_URL variable not set — skipping (see comment at top of workflow)."
-            exit 0
-          fi
           echo "Pinging $APP_URL"
-          curl -sSL --max-time 90 -o /dev/null -w "page: HTTP %{http_code}\n" "$APP_URL" || true
+          curl -sSL --max-time 90 -o /dev/null -w "page: HTTP %{http_code}\n" "$APP_URL"
           curl -sSL --max-time 30 -o /dev/null -w "health: HTTP %{http_code}\n" "${APP_URL%/}/_stcore/health" || true
