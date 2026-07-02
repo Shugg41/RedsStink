@@ -34,6 +34,15 @@ try:
 except Exception:
     def select_locks(*a, **k): return (None, [])
 
+# Headless data + pipeline layer (no Streamlit). The app wraps data.py's
+# fetchers with st.cache_data below; the daily auto-run robot uses them raw.
+import data
+import pipeline
+try:
+    import briefing
+except Exception:  # stale module during a deploy — the robot just skips a day
+    briefing = None
+
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
 # the internal API moves between Streamlit versions.
@@ -43,26 +52,13 @@ except Exception:  # pragma: no cover
     add_script_run_ctx = get_script_run_ctx = None
 
 # ============================================================
-# TIME / HTTP HELPERS
+# TIME / HTTP HELPERS (live in data.py now; re-exported for app code)
 # ============================================================
-EASTERN = ZoneInfo("America/New_York")
-HTTP_TIMEOUT = 10  # seconds — guard against hung MLB/Supabase/Odds calls
-
-def now_eastern():
-    """Current time in US Eastern (handles EST/EDT automatically)."""
-    return datetime.now(EASTERN)
-
-def http_get(url, **kwargs):
-    kwargs.setdefault("timeout", HTTP_TIMEOUT)
-    return requests.get(url, **kwargs)
-
-def http_post(url, **kwargs):
-    kwargs.setdefault("timeout", HTTP_TIMEOUT)
-    return requests.post(url, **kwargs)
-
-def http_patch(url, **kwargs):
-    kwargs.setdefault("timeout", HTTP_TIMEOUT)
-    return requests.patch(url, **kwargs)
+EASTERN      = data.EASTERN
+now_eastern  = data.now_eastern
+http_get     = data.http_get
+http_post    = data.http_post
+http_patch   = data.http_patch
 
 # ============================================================
 # PAGE CONFIG
@@ -309,6 +305,13 @@ try:
 except Exception:
     ODDS_API_KEY = None
 
+# Push-notification topic for the morning briefing (ntfy.sh — free, no signup).
+# Subscribe to this topic in the ntfy app to get the daily briefing.
+try:
+    NTFY_TOPIC = st.secrets["NTFY_TOPIC"]
+except Exception:
+    NTFY_TOPIC = "redsstink-briefing-rk84vq"
+
 # ============================================================
 # SESSION STATE INIT
 # ============================================================
@@ -470,189 +473,66 @@ def _grade_final_games(final_games, d, today_str):
         pass
 
 # ============================================================
-# API HELPERS
+# API HELPERS — cached wrappers around the pure fetchers in data.py
 # ============================================================
-@st.cache_data(ttl=86400)
-def get_league_hitting(year):
-    url = f"https://statsapi.mlb.com/api/v1/sports/1/stats?stats=season&group=hitting&season={year}"
-    try:
-        return http_get(url).json()['stats'][0]['splits'][0]['stat']
-    except Exception:
-        return {'obp': '.315', 'slg': '.400'}
+get_league_hitting   = st.cache_data(ttl=86400)(data.get_league_hitting)
+get_schedule         = st.cache_data(ttl=3600)(data.get_schedule)
+get_game_starters    = st.cache_data(ttl=300)(data.get_game_starters)
+get_live_feed        = st.cache_data(ttl=300)(data.get_live_feed)
+get_roster           = st.cache_data(ttl=86400)(data.get_roster)
+get_season_stats     = st.cache_data(ttl=3600)(data.get_season_stats)
+get_advanced_hitting = st.cache_data(ttl=3600)(data.get_advanced_hitting)
+get_advanced_pitching = st.cache_data(ttl=3600)(data.get_advanced_pitching)
+get_team_pitching    = st.cache_data(ttl=3600)(data.get_team_pitching)
+get_bullpen_fatigue  = st.cache_data(ttl=3600)(data.get_bullpen_fatigue)
+get_career_splits    = st.cache_data(ttl=86400)(data.get_career_splits)
+get_team_splits      = st.cache_data(ttl=3600)(data.get_team_splits)
+get_bvp_stats        = st.cache_data(ttl=3600)(data.get_bvp_stats)
+get_game_logs        = st.cache_data(ttl=3600)(data.get_game_logs)
+get_pitcher_hand     = st.cache_data(ttl=86400)(data.get_pitcher_hand)
+get_league_schedule  = st.cache_data(ttl=1800)(data.get_league_schedule)
 
-@st.cache_data(ttl=3600)
-def get_schedule(date_str):
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={date_str}&hydrate=probablePitcher"
-    try:
-        return http_get(url).json()
-    except Exception:
-        return {}  # bad/non-JSON response -> app degrades to the OFF DAY screen
+class _CachedFetch:
+    """Namespace handing the pipeline the CACHED fetchers (interactive path)."""
+    get_league_hitting   = staticmethod(lambda *a, **k: get_league_hitting(*a, **k))
+    get_schedule         = staticmethod(lambda *a, **k: get_schedule(*a, **k))
+    get_game_starters    = staticmethod(lambda *a, **k: get_game_starters(*a, **k))
+    get_live_feed        = staticmethod(lambda *a, **k: get_live_feed(*a, **k))
+    get_roster           = staticmethod(lambda *a, **k: get_roster(*a, **k))
+    get_season_stats     = staticmethod(lambda *a, **k: get_season_stats(*a, **k))
+    get_advanced_hitting = staticmethod(lambda *a, **k: get_advanced_hitting(*a, **k))
+    get_advanced_pitching = staticmethod(lambda *a, **k: get_advanced_pitching(*a, **k))
+    get_team_pitching    = staticmethod(lambda *a, **k: get_team_pitching(*a, **k))
+    get_career_splits    = staticmethod(lambda *a, **k: get_career_splits(*a, **k))
+    get_team_splits      = staticmethod(lambda *a, **k: get_team_splits(*a, **k))
+    get_bvp_stats        = staticmethod(lambda *a, **k: get_bvp_stats(*a, **k))
+    get_game_logs        = staticmethod(lambda *a, **k: get_game_logs(*a, **k))
+    get_pitcher_hand     = staticmethod(lambda *a, **k: get_pitcher_hand(*a, **k))
 
-@st.cache_data(ttl=300)
-def get_game_starters(game_pk):
-    url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-    try:
-        res = http_get(url).json()
-        starters = {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
-        probables = res.get('gameData', {}).get('probablePitchers', {})
-        for side in ('away', 'home'):
-            if side in probables:
-                starters[side] = {'id': probables[side]['id'], 'name': probables[side]['fullName']}
-        status = res.get('gameData', {}).get('status', {}).get('statusCode', '')
-        for side in ('away', 'home'):
-            if status in ['I', 'F', 'O', 'CR'] or starters[side]['name'] == 'TBD':
-                pitchers_list = res.get('liveData', {}).get('boxscore', {}).get('teams', {}).get(side, {}).get('pitchers', [])
-                if pitchers_list:
-                    p_id   = pitchers_list[0]
-                    player = res.get('gameData', {}).get('players', {}).get(f"ID{p_id}", {})
-                    if player:
-                        starters[side] = {'id': player.get('id'), 'name': player.get('fullName', 'TBD')}
-        return starters
-    except Exception:
-        return {'away': {'id': None, 'name': 'TBD'}, 'home': {'id': None, 'name': 'TBD'}}
+    @staticmethod
+    def get_pitcher_k_stats(pitcher_id, year):
+        adv  = get_advanced_pitching(pitcher_id, year)
+        logs = get_game_logs(pitcher_id, year, group="pitching")
+        l5   = logs[-5:] if logs else []
+        l5_k_list  = [g.get('stat', {}).get('strikeOuts', 0) for g in l5]
+        l5_ip_list = [calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) for g in l5]
+        l5_avg_k  = round(sum(l5_k_list) / len(l5_k_list), 1) if l5_k_list else 0.0
+        l5_avg_ip = round(sum(l5_ip_list) / len(l5_ip_list), 1) if l5_ip_list else 0.0
+        return adv, l5_k_list, l5_avg_k, l5_avg_ip
 
-@st.cache_data(ttl=300)
-def get_live_feed(game_pk):
-    """Cached game feed/live pull (used for lineups). Short TTL keeps it fresh
-    without re-fetching on every Streamlit rerun."""
-    try:
-        return http_get(f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live").json()
-    except Exception:
-        return {}
+FETCH = _CachedFetch()
 
-@st.cache_data(ttl=86400)
-def get_roster(team_id):
-    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
-    try:
-        return http_get(url).json().get('roster', [])
-    except Exception:
-        return []
+def _st_thread_hook():
+    """Attach Streamlit's ScriptRunContext to pipeline worker threads."""
+    if get_script_run_ctx and add_script_run_ctx:
+        ctx = _MAIN_CTX
+        if ctx:
+            add_script_run_ctx(threading.current_thread(), ctx)
 
-@st.cache_data(ttl=3600)
-def get_season_stats(player_id, group, year, split=None):
-    if split:
-        url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=statSplits&group={group}&season={year}&sitCodes={split}"
-    else:
-        url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group={group}&season={year}"
-    try:
-        return http_get(url).json()
-    except Exception:
-        return {}
-
-@st.cache_data(ttl=3600)
-def get_advanced_hitting(player_id, year):
-    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=hitting&season={year}"
-    res = http_get(url).json()
-    stats = {}
-    try:
-        for split in res.get('stats', []):
-            if split['type']['displayName'] in ['season', 'seasonAdvanced']:
-                stats.update(split['splits'][0]['stat'])
-    except Exception:
-        pass
-    return stats
-
-@st.cache_data(ttl=3600)
-def get_advanced_pitching(player_id, year):
-    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season,seasonAdvanced&group=pitching&season={year}"
-    res = http_get(url).json()
-    stats = {}
-    try:
-        for split in res.get('stats', []):
-            if split['type']['displayName'] in ['season', 'seasonAdvanced']:
-                stats.update(split['splits'][0]['stat'])
-    except Exception:
-        pass
-    return stats
-
-@st.cache_data(ttl=3600)
-def get_team_pitching(team_id, year):
-    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=pitching&season={year}&sitCodes=rp"
-    try:
-        return http_get(url).json()['stats'][0]['splits'][0]['stat']
-    except Exception:
-        return {}
-
-@st.cache_data(ttl=3600)
-def get_bullpen_fatigue(team_id):
-    today = now_eastern()
-    start = (today - timedelta(days=3)).strftime("%Y-%m-%d")
-    end   = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    url   = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=byDateRange&group=pitching&startDate={start}&endDate={end}&sitCodes=rp"
-    try:
-        res = http_get(url).json()
-        return calc_ip(res['stats'][0]['splits'][0]['stat'].get('inningsPitched', '0.0'))
-    except Exception:
-        return 0.0
-
-@st.cache_data(ttl=86400)
-def get_career_splits(player_id, group, split_code):
-    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=careerStatSplits&group={group}&sitCodes={split_code}"
-    try:
-        return http_get(url).json()
-    except Exception:
-        return {}
-
-@st.cache_data(ttl=3600)
-def get_team_splits(team_id, year, split_code):
-    url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=hitting&season={year}&sitCodes={split_code}"
-    try:
-        return http_get(url).json()['stats'][0]['splits'][0]['stat']
-    except Exception:
-        return {}
-
-@st.cache_data(ttl=3600)
-def get_bvp_stats(batter_id, pitcher_id):
-    if not pitcher_id: return None
-    url = f"https://statsapi.mlb.com/api/v1/people/{batter_id}/stats?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting"
-    try:
-        return http_get(url).json()['stats'][0]['splits'][0]['stat']
-    except Exception:
-        return None
-
-@st.cache_data(ttl=3600)
-def get_game_logs(player_id, year, group="hitting"):
-    url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group={group}&season={year}"
-    try:
-        return http_get(url).json()['stats'][0]['splits']
-    except Exception:
-        return []
-
-@st.cache_data(ttl=86400)
-def get_pitcher_hand(pitcher_id):
-    if not pitcher_id: return "R"
-    try:
-        return http_get(f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}").json()['people'][0]['pitchHand']['code']
-    except Exception:
-        return "R"
-
-@st.cache_data(ttl=3600)
-def get_pitcher_k_stats(pitcher_id, year):
-    """Pull all K-related metrics for strikeout engine."""
-    adv = get_advanced_pitching(pitcher_id, year)
-    logs = get_game_logs(pitcher_id, year, group="pitching")
-    l5   = logs[-5:] if logs else []
-    l5_k_list = [g.get('stat', {}).get('strikeOuts', 0) for g in l5]
-    l5_ip_list = [calc_ip(g.get('stat', {}).get('inningsPitched', '0.0')) for g in l5]
-    l5_avg_k  = round(sum(l5_k_list) / len(l5_k_list), 1) if l5_k_list else 0.0
-    l5_avg_ip = round(sum(l5_ip_list) / len(l5_ip_list), 1) if l5_ip_list else 0.0
-    return adv, l5_k_list, l5_avg_k, l5_avg_ip
-
-# ============================================================
-# LEAGUE-WIDE SLATE (Lock of the Day)
-# ============================================================
-@st.cache_data(ttl=1800)
-def get_league_schedule(date_str):
-    """All MLB games for a date with probable pitchers hydrated."""
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher"
-    try:
-        return http_get(url).json()
-    except Exception:
-        return {}
+_MAIN_CTX = get_script_run_ctx() if get_script_run_ctx else None
 
 def slate_probable_pitchers(sched):
-    """Flatten the league schedule into a list of probable-starter dicts:
-    {pitcher_id, pitcher_name, team_name, opp_team_id, opp_team_name, park_name}."""
+    """Flatten the league schedule into probable-starter dicts."""
     out = []
     for d in sched.get('dates', []):
         for g in d.get('games', []):
@@ -672,276 +552,27 @@ def slate_probable_pitchers(sched):
                 })
     return out
 
-def get_dk_pitcher_strikeouts(cap=None):
-    """League-wide DraftKings pitcher_strikeouts lines, keyed by normalized name:
-    {name: {'line', 'over_price', 'under_price'}}. Costs ~1 Odds API credit per
-    event, so this is on-demand only."""
-    if not ODDS_API_KEY:
-        return {}
-    base = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
-    out = {}
-    try:
-        ev_res = http_get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
-        if ev_res.status_code != 200:
-            st.error(f"Odds API (events) failed: {ev_res.text[:160]}")
-            return {}
-        events = ev_res.json() or []
-        if cap:
-            events = events[:cap]
-        for e in events:
-            eid = e.get('id')
-            if not eid:
-                continue
-            r = http_get(f"{base}/events/{eid}/odds", params={
-                "apiKey": ODDS_API_KEY, "regions": "us",
-                "markets": "pitcher_strikeouts", "bookmakers": "draftkings",
-                "oddsFormat": "american",
-            })
-            if r.status_code != 200:
-                continue
-            game = r.json()
-            for book in game.get('bookmakers', []):
-                for market in book.get('markets', []):
-                    if market.get('key') != 'pitcher_strikeouts':
-                        continue
-                    for o in market.get('outcomes', []):
-                        nm = normalize_name(o.get('description', ''))
-                        if not nm:
-                            continue
-                        rec = out.setdefault(nm, {'line': o.get('point'),
-                                                  'over_price': None, 'under_price': None})
-                        if o.get('point') is not None:
-                            rec['line'] = o.get('point')
-                        if o.get('name') == 'Over':
-                            rec['over_price'] = o.get('price')
-                        elif o.get('name') == 'Under':
-                            rec['under_price'] = o.get('price')
-        return out
-    except Exception as ex:
-        st.error(f"Odds API (pitcher Ks) error: {ex}")
-        return {}
+def _show_odds_msgs(msgs):
+    for level, text in msgs or []:
+        (st.error if level == "error" else st.warning)(text)
 
-# ============================================================
-# ODDS API
-# ============================================================
 def get_draftkings_odds():
-    """Fetch DraftKings batter_hits props for the REDS game only.
+    """Reds batter hits + HRR lines (pure fetch in data.py; messages shown here)."""
+    odds, msgs = data.fetch_reds_batter_odds(ODDS_API_KEY)
+    _show_odds_msgs(msgs)
+    return odds
 
-    Free-tier friendly: lists events (cheap), finds the Reds matchup, then
-    pulls batter_hits for that ONE event. ~1 credit per fetch instead of one
-    per game on the slate. Market key is 'batter_hits' (no 'player_' prefix);
-    player props are only served via /events/{id}/odds, not the slate /odds.
-    """
-    if not ODDS_API_KEY:
-        return {}
+def get_dk_pitcher_strikeouts(cap=None):
+    """League-wide pitcher K lines (pure fetch in data.py; messages shown here)."""
+    odds, msgs = data.fetch_pitcher_strikeout_odds(ODDS_API_KEY, cap=cap)
+    _show_odds_msgs(msgs)
+    return odds
 
-    base = "https://api.the-odds-api.com/v4/sports/baseball_mlb"
-    try:
-        # --- Step 1: list events (cheap, no markets) ---
-        ev_res = http_get(f"{base}/events", params={"apiKey": ODDS_API_KEY})
-        if ev_res.status_code != 200:
-            st.error(f"Odds API (events) failed: {ev_res.text[:200]}")
-            return {}
-        events = ev_res.json()
-        if not events:
-            st.warning("No MLB events returned by the odds provider right now.")
-            return {}
-
-        # --- Find the Reds event only ---
-        reds_event_id = None
-        for ev in events:
-            home = ev.get('home_team', '')
-            away = ev.get('away_team', '')
-            if 'Reds' in home or 'Reds' in away:
-                reds_event_id = ev.get('id')
-                break
-
-        if not reds_event_id:
-            st.warning("No Reds game found on the odds provider's slate for today.")
-            return {}
-
-        # --- Step 2: pull batter_hits + HRR for the Reds event (one request) ---
-        o_res = http_get(
-            f"{base}/events/{reds_event_id}/odds",
-            params={
-                "apiKey": ODDS_API_KEY,
-                "regions": "us",
-                "markets": "batter_hits,batter_hits_runs_rbis",
-                "bookmakers": "draftkings",
-                "oddsFormat": "american",
-            }
-        )
-        if o_res.status_code != 200:
-            st.error(f"Odds API (Reds event) failed: {o_res.text[:200]}")
-            return {}
-
-        odds_dict = {}
-        game = o_res.json()
-        for book in game.get('bookmakers', []):
-            for market in book.get('markets', []):
-                mkey = market.get('key')
-                if mkey not in ('batter_hits', 'batter_hits_runs_rbis'):
-                    continue
-                for outcome in market.get('outcomes', []):
-                    if outcome.get('name') != 'Over':
-                        continue
-                    nm  = normalize_name(outcome.get('description', ''))
-                    rec = odds_dict.setdefault(nm, {})
-                    if mkey == 'batter_hits':
-                        rec['line']  = outcome.get('point', 0.5)
-                        rec['price'] = outcome.get('price', 0)
-                    else:  # batter_hits_runs_rbis
-                        rec['hrr_line']  = outcome.get('point', 0.5)
-                        rec['hrr_price'] = outcome.get('price', 0)
-        if not odds_dict:
-            st.warning("Found the Reds game, but no DraftKings batter lines are posted yet (often not until a few hours before first pitch).")
-        return odds_dict
-    except Exception as e:
-        st.error(f"Odds API error: {str(e)}")
-        return {}
-
-# ============================================================
-# STRIKEOUT ENGINE — projected Ks for one pitcher
-# ============================================================
 def run_strikeout_engine(pitcher_id, pitcher_name, opp_team_id, opp_team_name, park_name, year):
-    """Returns (projected_ks, receipt_lines, meta). receipt_lines is a list of
-    (label, value, description); meta is {'opener': bool}."""
-    if not pitcher_id:
-        return None, [], {"opener": False, "data_ok": False, "exp_ip": 0.0}
+    """Interactive wrapper over the headless pipeline engine (cached fetchers)."""
+    return pipeline.run_strikeout_engine(FETCH, pitcher_id, pitcher_name,
+                                         opp_team_id, opp_team_name, park_name, year)
 
-    adv, l5_k_list, l5_avg_k, l5_avg_ip = get_pitcher_k_stats(pitcher_id, year)
-    receipt = []
-
-    # --- BASE: K/9 × stable expected innings (anchored on season IP/start) ---
-    try:
-        k9 = float(adv.get('strikeoutsPer9Inn', adv.get('k9', '7.5')))
-    except Exception:
-        k9 = 7.5
-    season_gs  = adv.get('gamesStarted', 0)
-    season_gp  = adv.get('gamesPlayed', 0)
-    season_ip  = calc_ip(adv.get('inningsPitched', '0.0'))
-    season_ips = ip_per_start(season_ip, season_gs)
-    exp_ip     = expected_starter_ip(season_ip, season_gs, l5_avg_ip)
-    opener     = is_likely_opener(season_ip, season_gs, season_gp)
-    base_ks    = base_k_projection(k9, exp_ip)
-    receipt.append(("Base K Projection (K/9 × Exp IP)", base_ks,
-                    f"K/9 {k9:.1f} × Exp IP {exp_ip:.1f} (season {season_ips:.1f}/start, L5 {l5_avg_ip})"))
-    if opener:
-        receipt.append(("⚠ Likely opener", 0.0,
-                        f"~{season_ips:.1f} IP/start — projection unreliable; the bulk pitcher gets the Ks"))
-
-    # --- FORM: L5 trend vs K/9 baseline ---
-    if l5_k_list:
-        l5_k_trend = round(sum(l5_k_list) / len(l5_k_list), 1)
-        form_diff  = l5_k_trend - base_ks
-        form_adj   = round(max(-SK_FORM_ADJ_MAX, min(SK_FORM_ADJ_MAX, form_diff * 0.4)), 1)
-        receipt.append(("L5 Form Trend", form_adj, f"L5 Avg Ks: {l5_k_trend} vs projected {base_ks}"))
-    else:
-        form_adj = 0.0
-        receipt.append(("L5 Form Trend", 0.0, "No recent data"))
-
-    # --- SwStr% / Swing-and-miss proxy using BB% and K% ---
-    try:
-        k_pct  = float(adv.get('strikeoutsPerPlateAppearance', adv.get('kPct', '0.22')))
-        bb_pct = float(adv.get('walksPerPlateAppearance', adv.get('bbPct', '0.08')))
-        if k_pct >= 0.28:   swstr_adj = SK_SWSTR_BONUS
-        elif k_pct >= 0.24: swstr_adj = SK_SWSTR_BONUS * 0.5
-        elif k_pct <= 0.17: swstr_adj = -SK_SWSTR_BONUS
-        else:               swstr_adj = 0.0
-        if bb_pct > 0.12:   swstr_adj -= 0.25
-        receipt.append(("K% / Swing-Miss Profile", round(swstr_adj, 2), f"K%: {k_pct*100:.1f}%, BB%: {bb_pct*100:.1f}%"))
-    except Exception:
-        swstr_adj = 0.0
-        receipt.append(("K% / Swing-Miss Profile", 0.0, "Unavailable"))
-
-    # --- Opponent K% vs pitcher hand ---
-    p_hand = get_pitcher_hand(pitcher_id)
-    split_code = "vl" if p_hand == "L" else "vr"
-    split_label = "LHP" if p_hand == "L" else "RHP"
-    opp_splits = get_team_splits(opp_team_id, year, split_code)
-    try:
-        pa = int(opp_splits.get('plateAppearances', 0))
-        so = int(opp_splits.get('strikeOuts', 0))
-        opp_k_pct = (so / pa) if pa > 0 else 0.22
-        if opp_k_pct >= 0.27:   opp_k_adj = SK_OPP_K_BONUS
-        elif opp_k_pct >= 0.24: opp_k_adj = SK_OPP_K_BONUS * 0.5
-        elif opp_k_pct <= 0.18: opp_k_adj = -SK_OPP_K_BONUS
-        else:                    opp_k_adj = 0.0
-        receipt.append((f"{opp_team_name} K% vs {split_label}", round(opp_k_adj, 2),
-                         f"{opp_k_pct*100:.1f}% K rate"))
-    except Exception:
-        opp_k_adj = 0.0
-        receipt.append((f"{opp_team_name} K% vs {split_label}", 0.0, "Unavailable"))
-
-    # --- Opp P/PA (patient lineup = fewer Ks) ---
-    try:
-        opp_ppa = float(opp_splits.get('pitchesPerPlateAppearance', '3.85'))
-        ppa_adj = -0.4 if opp_ppa > 4.1 else (-0.2 if opp_ppa > 3.95 else (0.3 if opp_ppa < 3.70 else 0.0))
-        receipt.append((f"{opp_team_name} P/PA", round(ppa_adj, 2), f"{opp_ppa:.2f} pitches/PA"))
-    except Exception:
-        ppa_adj = 0.0
-        receipt.append((f"{opp_team_name} P/PA", 0.0, "Unavailable"))
-
-    # --- WHIP (command) ---
-    try:
-        whip = float(adv.get('whip', '1.25'))
-        whip_adj = -SK_WHIP_ADJ if whip > 1.45 else (-0.25 if whip > 1.30 else (SK_WHIP_ADJ if whip < 1.10 else 0.0))
-        receipt.append(("Command / WHIP", round(whip_adj, 2), f"WHIP: {whip:.2f}"))
-    except Exception:
-        whip_adj = 0.0
-        receipt.append(("Command / WHIP", 0.0, "Unavailable"))
-
-    # --- Park factor ---
-    if park_name in HITTER_PARKS:
-        park_k_adj = -SK_PARK_K_ADJ
-    elif park_name in PITCHER_PARKS:
-        park_k_adj = SK_PARK_K_ADJ
-    else:
-        park_k_adj = 0.0
-    receipt.append((f"Park Factor ({park_name})", round(park_k_adj, 2), "Hitter/Pitcher park adjustment"))
-
-    # --- FINAL ---
-    total_adj   = form_adj + swstr_adj + opp_k_adj + ppa_adj + whip_adj + park_k_adj
-    projected_k = round(max(0.0, base_ks + total_adj), 1)
-
-    meta = {"opener": opener, "data_ok": (season_ip > 0 or l5_avg_ip > 0), "exp_ip": exp_ip}
-    return projected_k, receipt, meta
-
-# ============================================================
-# PARALLEL HITTER PREFETCH
-# ============================================================
-def _prefetch_hitter(p_id, year, split_code, opp_pitcher_id):
-    """Pull every API blob one hitter needs in a single call so the whole
-    roster can be fetched concurrently. All callees are @st.cache_data, so a
-    warm cache short-circuits the network."""
-    return {
-        'logs':    get_game_logs(p_id, year),
-        'ov_data': get_season_stats(p_id, "hitting", year),
-        'adv_hit': get_advanced_hitting(p_id, year),
-        'sp_data': get_season_stats(p_id, "hitting", year, split=split_code),
-        'bvp':     get_bvp_stats(p_id, opp_pitcher_id),
-    }
-
-def _parallel_prefetch(player_ids, year, split_code, opp_pitcher_id, max_workers=8):
-    """Fetch every hitter's stats in parallel. Returns {player_id: blob|None}.
-    Replaces ~6 sequential network calls per hitter with a concurrent sweep."""
-    if not player_ids:
-        return {}
-    ctx = get_script_run_ctx() if get_script_run_ctx else None
-
-    def task(pid):
-        if ctx and add_script_run_ctx:
-            add_script_run_ctx(threading.current_thread(), ctx)
-        try:
-            return pid, _prefetch_hitter(pid, year, split_code, opp_pitcher_id)
-        except Exception:
-            return pid, None
-
-    out = {}
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(player_ids))) as ex:
-        for pid, blob in ex.map(task, player_ids):
-            out[pid] = blob
-    return out
 
 # ============================================================
 # PLAYER CARD HTML
@@ -1374,6 +1005,20 @@ if SUPABASE_URL:
         threading.Thread(target=auto_grade_worker, daemon=True).start()
 
 # ============================================================
+# DAILY AUTO-RUN — morning board + briefing, kicked by any visit (incl. the
+# keep-awake robot) after 9am ET. Dedup via an atomic marker row, so this is
+# safe to fire on every session; it becomes a no-op after the first run.
+# ============================================================
+if SUPABASE_URL and briefing is not None and not st.session_state.get('autorun_kicked'):
+    st.session_state['autorun_kicked'] = True
+    threading.Thread(
+        target=briefing.daily_autorun,
+        kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
+                    db_headers_upsert=DB_HEADERS_UPSERT,
+                    odds_api_key=ODDS_API_KEY, ntfy_topic=NTFY_TOPIC),
+        daemon=True).start()
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
@@ -1487,6 +1132,20 @@ if data and data.get('totalGames', 0) > 0:
     # TAB 1 — OFFENSIVE ENGINE
     # ----------------------------------------------------------
     with tab1:
+        # --- 📰 Today's Briefing (auto-saved by the morning robot) ---
+        if SUPABASE_URL:
+            try:
+                _b = http_get(f"{SUPABASE_URL}/rest/v1/predictions"
+                              f"?date=eq.{date_str}&player_id=gt.0&graded=eq.0"
+                              f"&select=player_name,score,tier,odds_price&order=score.desc&limit=3",
+                              headers=DB_HEADERS)
+                _rows = _b.json() if _b.status_code == 200 else []
+                if _rows:
+                    _top = " · ".join(f"**{r['player_name']}** {r['score']}" for r in _rows)
+                    st.success(f"📰 Today's picks are already saved (auto-run this morning). Top of the board: {_top}")
+            except Exception:
+                pass
+
         # --- DraftKings Fetch Button (prominent, top of tab) ---
         fetch_col, status_col = st.columns([1, 2])
         with fetch_col:
@@ -1560,173 +1219,37 @@ if data and data.get('totalGames', 0) > 0:
                 # refresh local handle after potential auto-fetch
                 live_odds = st.session_state['dk_odds'] if st.session_state.get('dk_odds_date') == date_str else {}
 
-                scan_results = []
-                league_stats = get_league_hitting(current_year)
-
                 # Opposing starter's FIP is the same for every Reds hitter — compute once.
                 opp_fip_val = 4.00
                 if adv_stats:
                     try:    opp_fip_val = float(calculate_fip(adv_stats))
                     except Exception: opp_fip_val = 4.00
 
-                # Decide who we actually score (respect "hide bench"), then fetch
-                # all of their stats concurrently instead of one hitter at a time.
+                # Decide who we actually score (respect "hide bench")
                 to_score = []
                 for name, p_id in hitters.items():
                     if reds_batting_order and show_starters and p_id not in reds_batting_order:
                         continue
                     to_score.append((name, p_id))
 
-                with st.spinner(f"Fetching stats for {len(to_score)} hitters in parallel..."):
-                    prefetched = _parallel_prefetch(
-                        [pid for _, pid in to_score], current_year, split_code, opp_pitcher_id
-                    )
-
                 # Bullpen ERA is the same for every Reds hitter — pull once for HRR.
                 try:    bullpen_era = float(opp_bullpen.get('era', 4.0) or 4.0)
                 except Exception: bullpen_era = 4.0
 
-                pb = st.progress(0, text="Scoring roster...")
-                n_score = max(1, len(to_score))
-                for i, (name, p_id) in enumerate(to_score):
-                    pb.progress((i + 1) / n_score, text=f"Scoring {name}...")
-                    lineup_score, in_lineup, idx_pos = 0, False, None
-                    if reds_batting_order and p_id in reds_batting_order:
-                        in_lineup    = True
-                        idx_pos      = reds_batting_order.index(p_id)
-                        lineup_score = LINEUP_TOP_BONUS if idx_pos <= 2 else (LINEUP_BOT_PENALTY if idx_pos >= 6 else 0)
-
-                    blob = prefetched.get(p_id) or {}
-
-                    # L10 form
-                    hit_games, l10_total, l10_h_avg, l10_hrr_avg = 0, 0, 0.0, 0.0
-                    logs = blob.get('logs') or []
-                    season_hrr_pg = 0.0
-                    if logs:
-                        l10       = logs[-10:]
-                        l10_total = len(l10)
-                        hit_games = sum(1 for g in l10 if g.get('stat', {}).get('hits', 0) > 0)
-                        if l10_total > 0:
-                            l10_h_avg   = round(sum(g.get('stat', {}).get('hits', 0) for g in l10) / l10_total, 1)
-                            l10_hrr_avg = round(sum((g['stat'].get('hits', 0) + g['stat'].get('runs', 0) + g['stat'].get('rbi', 0)) for g in l10) / l10_total, 1)
-                        # Season HRR/game = stable base rate for the HRR projection
-                        season_hrr_pg = round(sum((g['stat'].get('hits', 0) + g['stat'].get('runs', 0) + g['stat'].get('rbi', 0)) for g in logs) / len(logs), 2)
-
-                    overall_avg, ops_plus, babip = ".000", "N/A", ".000"
-                    k_pct_val, iso_val = 0.22, 0.140
-                    ov_data  = blob.get('ov_data') or {}
-                    adv_hit  = blob.get('adv_hit') or {}
-                    try:
-                        psb        = ov_data['stats'][0]['splits'][0]['stat']
-                        overall_avg = psb.get('avg', '.000')
-                        ops_plus    = calculate_ops_plus(psb, league_stats)
-                        babip       = adv_hit.get('babip', '.000')
-                    except Exception:
-                        pass
-                    try:    k_pct_val = float(adv_hit.get('strikeoutsPerPlateAppearance', 0.22) or 0.22)
-                    except Exception: k_pct_val = 0.22
-                    try:    iso_val = float(adv_hit.get('iso', 0.140) or 0.140)
-                    except Exception: iso_val = 0.140
-
-                    split_ops, split_pa = 0.0, 0
-                    sp_data   = blob.get('sp_data') or {}
-                    try:
-                        _sp = sp_data['stats'][0]['splits'][0]['stat']
-                        split_ops = float(_sp.get('ops', 0))
-                        split_pa  = int(_sp.get('plateAppearances', 0) or 0)
-                    except Exception:
-                        try:
-                            c_data    = get_career_splits(p_id, "hitting", split_code)
-                            _sp = c_data['stats'][0]['splits'][0]['stat']
-                            split_ops = float(_sp.get('ops', 0))
-                            split_pa  = int(_sp.get('plateAppearances', 0) or 0)
-                        except Exception:
-                            pass
-
-                    bvp_avg, bvp_pa = 0.0, 0
-                    bvp = blob.get('bvp')
-                    if bvp:
-                        bvp_avg = float(bvp.get('avg', 0) or 0)
-                        bvp_pa  = int(bvp.get('plateAppearances', bvp.get('atBats', 0)) or 0)
-
-                    # --- Scoring (ADDITIVE engine; BvP & splits are sample-gated) ---
-                    split_score = split_ops_points(split_ops, split_pa)   # shrinks below SPLIT_MIN_PA
-                    bvp_bonus   = bvp_bonus_points(bvp_avg, bvp_pa)        # shrinks below BVP_MIN_PA
-                    cons_score  = int((hit_games / 10.0) * WEIGHT_CONSISTENCY) if l10_total > 0 else 0
-                    hrr_score   = int(min(WEIGHT_HRR, (l10_hrr_avg / 2.5) * WEIGHT_HRR))
-                    penalty     = scaled_babip_penalty(babip)  # scaled, -1/.010 over .340, cap -20
-
-                    raw_score   = split_score + cons_score + hrr_score + pitcher_score + lineup_score + bvp_bonus + penalty
-                    total_score = min(100, max(0, raw_score))
-                    tier        = "🟢 Tier 1" if total_score >= TIER1_THRESHOLD else ("🟡 Tier 2" if total_score >= TIER2_THRESHOLD else "🔴 Tier 3")
-
-                    # --- MULTIPLICATIVE engine (side-by-side) ---
-                    lineup_pos_val = idx_pos
-                    l10_hit_rate   = (hit_games / l10_total) if l10_total > 0 else 0.0
-                    mult_score, mult_tier, mult_baseline, mult_receipt = run_multiplicative_engine({
-                        'ops_plus': ops_plus, 'iso': iso_val, 'k_pct': k_pct_val,
-                        'l10_hit_rate': l10_hit_rate, 'opp_fip': opp_fip_val,
-                        'park_name': park_name, 'lineup_pos': lineup_pos_val, 'babip': babip
-                    })
-
-                    # Disagreement flag: only fire when TIER 1 is involved on either
-                    # engine — that's the only disagreement that affects a real bet.
-                    def _tier_rank(t): return 1 if "Tier 1" in t else (2 if "Tier 2" in t else 3)
-                    tiers_cross   = _tier_rank(tier) != _tier_rank(mult_tier)
-                    t1_involved   = ("Tier 1" in tier) or ("Tier 1" in mult_tier)
-                    engines_disagree = tiers_cross and t1_involved
-
-                    dk_info = live_odds.get(normalize_name(name), {})
-
-                    # Build receipt dict for Tier 1
-                    receipt = {}
-                    if total_score >= TIER1_THRESHOLD:
-                        receipt = {
-                            f"Consistency Score (L10 hit rate)":       cons_score,
-                            f"HRR Score (L10 avg HRR)":                hrr_score,
-                            f"Split OPS vs {split_label} ({split_pa} PA)": split_score,
-                            f"Pitcher ERA Bonus":                      pitcher_score,
-                            f"Lineup Position Bonus":                  lineup_score,
-                            f"BvP History ({bvp_pa} PA)":              bvp_bonus,
-                            f"BABIP Guardrail (scaled)":               penalty,
-                        }
-
-                    # --- HRR engine: projected hits+runs+RBI and P(2+) ---
-                    hrr_proj = project_hrr(season_hrr_pg, l10_hrr_avg, idx_pos,
-                                           opp_fip_val, bullpen_era, park_name)
-                    hrr_p2   = prob_2plus_hrr(hrr_proj)
-
-                    scan_results.append({
-                        "Player": name, "Player_ID": p_id, "Tier": tier, "Score": total_score,
-                        "Avg": overall_avg, "Raw_OPS": split_ops, "L10_HRR": l10_hrr_avg,
-                        "L10_Hits": l10_h_avg, "BVP_Avg": bvp_avg,
-                        "OPS_Display": f"{split_ops:.3f}", "OPS_Plus": ops_plus,
-                        "DK_Info": dk_info, "Receipt": receipt,
-                        # multiplicative + diagnostics
-                        "Mult_Score": mult_score, "Mult_Tier": mult_tier,
-                        "Mult_Baseline": mult_baseline, "Mult_Receipt": mult_receipt,
-                        "Disagree": engines_disagree,
-                        "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
-                        "HRR_Proj": hrr_proj, "HRR_P2": hrr_p2
-                    })
-
+                pb = st.progress(0, text=f"Scoring {len(to_score)} hitters...")
+                scan_results = pipeline.score_hitters(
+                    FETCH, to_score, current_year, split_code, split_label,
+                    reds_batting_order, park_name, pitcher_score, opp_fip_val,
+                    bullpen_era, live_odds, opp_pitcher_id,
+                    progress_cb=lambda frac, nm: pb.progress(frac, text=f"Scoring {nm}..."),
+                    thread_hook=_st_thread_hook)
                 pb.empty()
 
                 # --- Save to Supabase (UPSERT w/ odds at pick time) ---
                 if SUPABASE_URL:
                     if is_pregame:
-                        insert_data = [{
-                            "date": date_str, "player_id": r['Player_ID'], "player_name": r['Player'],
-                            "game_pk": int(game_pk),
-                            "score": r['Score'], "tier": r['Tier'], "opp_pitcher": opp_pitcher_name,
-                            "actual_hits": 0, "actual_hrr": 0, "graded": 0, "win": 0,
-                            "odds_line":  r['DK_Info'].get('line')  if r['DK_Info'] else None,
-                            "odds_price": r['DK_Info'].get('price') if r['DK_Info'] else None,
-                            "mult_score": r['Mult_Score'], "mult_tier": r['Mult_Tier'],
-                            "mult_baseline": r['Mult_Baseline'],
-                            "babip":   (float(r['BABIP']) if r['BABIP'] not in (None, '.000', '') else None),
-                            "k_pct":   r['K_Pct'], "iso": r['ISO'], "opp_fip": r['Opp_FIP']
-                        } for r in scan_results]
+                        insert_data = pipeline.hitting_payload(
+                            scan_results, date_str, game_pk, opp_pitcher_name)
                         # merge-duplicates upsert keyed on (date, player_id, game_pk)
                         # so doubleheaders (same date+player, different game) stay separate
                         save_res = http_post(
@@ -1822,15 +1345,7 @@ if data and data.get('totalGames', 0) > 0:
             # --- Save K projections to Supabase (pregame only) ---
             if SUPABASE_URL and k_projections:
                 if is_pregame:
-                    payload = [{
-                        "date": date_str,
-                        "player_id": kp["player_id"],
-                        "player_name": kp["player_name"],
-                        "game_pk": int(game_pk),
-                        "projected_ks": kp["projected_ks"],
-                        "actual_ks": 0,
-                        "graded": 0
-                    } for kp in k_projections]
+                    payload = pipeline.pitching_payload(k_projections, date_str, game_pk)
                     ksave = http_post(
                         f"{SUPABASE_URL}/rest/v1/pitcher_predictions?on_conflict=date,player_id,game_pk",
                         json=payload, headers=DB_HEADERS_UPSERT

@@ -13,6 +13,8 @@ name: Keep app awake
 on:
   schedule:
     - cron: "23 */4 * * *"   # every 4 hours (sleep threshold is ~12h idle)
+    - cron: "5 14 * * *"     # ~10:05am ET: the visit that triggers the daily
+                             # auto-run (board + saved picks + push briefing)
   workflow_dispatch: {}
 
 jobs:
