@@ -332,18 +332,14 @@ def signed(v):
     return f"{v:+g}"
 
 # ============================================================
-# AUTO-GRADER — 30-min guard
+# AUTO-GRADER
 # ============================================================
-def auto_grade_past_predictions():
+def auto_grade_worker():
+    """Grade past predictions. Pure network + DB — no Streamlit calls — so it
+    can run in a background thread without blocking the first render."""
     if not SUPABASE_URL:
         return
-    now = now_eastern()
-    last = st.session_state.get('last_autograde_time')
-    if last and (now - last).total_seconds() < 1800:
-        return
-    st.session_state['last_autograde_time'] = now
-
-    today_str = now.strftime("%Y-%m-%d")
+    today_str = now_eastern().strftime("%Y-%m-%d")
 
     dates_to_grade = set()
     for endpoint in ["predictions", "pitcher_predictions"]:
@@ -1368,9 +1364,14 @@ def render_season_scoreboard(sb):
                     f"Not enough priced bets yet for a reliable ROI read.")
 
 # ============================================================
-# EXECUTE AUTO-GRADER
+# EXECUTE AUTO-GRADER — in the background, so it never blocks first paint
 # ============================================================
-auto_grade_past_predictions()
+if SUPABASE_URL:
+    _now = now_eastern()
+    _last = st.session_state.get('last_autograde_time')
+    if not _last or (_now - _last).total_seconds() >= 1800:
+        st.session_state['last_autograde_time'] = _now
+        threading.Thread(target=auto_grade_worker, daemon=True).start()
 
 # ============================================================
 # SIDEBAR
@@ -1475,11 +1476,10 @@ if data and data.get('totalGames', 0) > 0:
     # ============================================================
     # TABS
     # ============================================================
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab5 = st.tabs([
         "🔥 Offense Top Matchups",
         "⚡ Strikeout Engine",
         "📊 System Tracker",
-        "🔍 Player Deep Dive",
         "🎯 Lock of the Day"
     ])
 
@@ -1905,124 +1905,9 @@ if data and data.get('totalGames', 0) > 0:
                     df_active = df_track[(df_track['graded'] == 1) & (df_track['win'] != -1)].copy()
 
                     if not df_active.empty:
-                        df_active['date_obj'] = pd.to_datetime(df_active['date'])
-
-                        def calc_points(row):
-                            if row['win'] == 1:
-                                return 3 if "Tier 1" in row['tier'] else (2 if "Tier 2" in row['tier'] else 1)
-                            else:
-                                return -3 if "Tier 1" in row['tier'] else (-2 if "Tier 2" in row['tier'] else 0)
-
-                        df_active['points']  = df_active.apply(calc_points, axis=1)
-                        total_wins  = df_active['win'].sum()
-                        win_rate    = (total_wins / len(df_active)) * 100
-                        sys_score   = df_active['points'].sum()
-
-                        # ============================================
-                        # PROOF LAYER — Tier 1 only (the bets actually placed)
-                        # ============================================
-                        st.markdown("#### 🔬 Engine Proof Layer")
-                        st.caption("Measured on TIER 1 plays only — the tier you actually bet.")
-
-                        df_t1 = df_active[df_active['tier'].str.contains("Tier 1", na=False)].copy()
-
-                        # --- Brier score (Tier 1, straight bets: model_prob = score/100) ---
-                        if not df_t1.empty:
-                            df_t1['model_prob'] = df_t1['score'] / 100.0
-                            df_t1['brier']      = (df_t1['model_prob'] - df_t1['win']) ** 2
-                            brier = df_t1['brier'].mean()
-                            if   brier <= 0.17: b_grade, b_cls = "A", "grade-a"
-                            elif brier <= 0.21: b_grade, b_cls = "B", "grade-b"
-                            elif brier <= 0.25: b_grade, b_cls = "C", "grade-c"
-                            else:               b_grade, b_cls = "D", "grade-d"
-                            brier_sub = f"{brier:.3f} &nbsp; (0.25 = coin flip) · {len(df_t1)} T1 plays"
-                        else:
-                            b_grade, b_cls, brier_sub = "—", "receipt-neu", "No graded Tier 1 plays yet"
-
-                        # --- ROI / units (Tier 1 with stored odds) ---
-                        roi_txt, units_txt = "N/A (no odds yet)", "—"
-                        t1_odds = df_t1.dropna(subset=['odds_price']) if ('odds_price' in df_t1.columns and not df_t1.empty) else pd.DataFrame()
-                        if not t1_odds.empty:
-                            t1_odds = t1_odds.copy()
-                            t1_odds['units'] = t1_odds.apply(lambda r: units_won(r['odds_price'], r['win']), axis=1)
-                            total_units = t1_odds['units'].sum()
-                            roi_pct     = (total_units / len(t1_odds)) * 100
-                            units_txt   = f"{total_units:+.2f} U"
-                            roi_txt     = f"{roi_pct:+.1f}%"
-
-                        pc1, pc2, pc3 = st.columns(3)
-                        with pc1:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 Calibration Grade (Brier)</div>'
-                                        f'<div class="proof-big {b_cls}">{b_grade}</div>'
-                                        f'<div class="proof-label">{brier_sub}</div></div>',
-                                        unsafe_allow_html=True)
-                        with pc2:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 ROI (graded, w/ odds)</div>'
-                                        f'<div class="proof-big">{roi_txt}</div>'
-                                        f'<div class="proof-label">{len(t1_odds)} priced T1 bets</div></div>',
-                                        unsafe_allow_html=True)
-                        with pc3:
-                            st.markdown(f'<div class="proof-card"><div class="proof-label">T1 Net Units</div>'
-                                        f'<div class="proof-big">{units_txt}</div>'
-                                        f'<div class="proof-label">1U flat stake</div></div>',
-                                        unsafe_allow_html=True)
-
-                        st.divider()
-
-                        # --- CALIBRATION CHART: score bucket vs actual hit rate (straight tiers) ---
-                        st.markdown("#### 🎯 Calibration: Predicted Score vs Actual Hit Rate")
-                        st.caption("All straight tiers (1 & 2), bucketed by score. If the engine works, hit rate should climb as score climbs.")
-                        df_straight = df_active[~df_active['tier'].str.contains("Tier 3", na=False)].copy()
-                        if not df_straight.empty:
-                            bins   = [0, 55, 65, 75, 85, 101]
-                            labels = ["<55", "55-64", "65-74", "75-84", "85+"]
-                            df_straight['bucket'] = pd.cut(df_straight['score'], bins=bins, labels=labels, right=False)
-                            calib = df_straight.groupby('bucket', observed=True)['win'].agg(['mean', 'count']).reset_index()
-                            calib['Hit Rate %'] = (calib['mean'] * 100).round(1)
-                            calib = calib.rename(columns={'bucket': 'Score Bucket', 'count': 'Plays'})
-                            st.bar_chart(calib.set_index('Score Bucket')['Hit Rate %'])
-                            st.dataframe(calib[['Score Bucket', 'Hit Rate %', 'Plays']], hide_index=True, use_container_width=True)
-                        else:
-                            st.info("Need graded Tier 1/2 plays to build calibration.")
-
-                        st.divider()
-
-                        # --- Tier metrics ---
-                        st.markdown("#### 🏅 Tier Performance & Units")
-                        t1_active = df_active[df_active['tier'].str.contains("Tier 1")]
-                        t1_units  = t1_active['win'].apply(lambda x: 1 if x == 1 else -1).sum() if not t1_active.empty else 0
-                        tier_grp  = df_active.groupby('tier')['win'].agg(['count', 'mean']).reset_index()
-                        top_cols  = st.columns(len(tier_grp) + 1)
-                        top_cols[0].metric("🥇 T1 Units", f"{t1_units:+g} U")
-                        for i, r in tier_grp.iterrows():
-                            top_cols[i + 1].metric(r['tier'], f"{r['mean']*100:.1f}%", f"{int(r['count'])} plays")
-
-                        st.divider()
-
-                        # --- Win % Chart ---
-                        st.markdown("#### 📈 Rolling Win % Over Time")
-                        df_chart = (
-                            df_active.sort_values('date_obj')
-                            .groupby('date_obj')['win']
-                            .mean()
-                            .reset_index()
-                        )
-                        df_chart.columns = ['Date', 'Win %']
-                        df_chart['Win %'] = (df_chart['Win %'] * 100).round(1)
-                        df_chart['Rolling Win %'] = df_chart['Win %'].rolling(window=5, min_periods=1).mean().round(1)
-                        st.line_chart(df_chart.set_index('Date')[['Win %', 'Rolling Win %']])
-
-                        st.divider()
-
-                        l7_date     = df_active['date_obj'].max() - pd.Timedelta(days=7)
-                        df_l7       = df_active[df_active['date_obj'] >= l7_date]
-                        l7_win_rate = (df_l7['win'].sum() / len(df_l7)) * 100 if not df_l7.empty else 0.0
-                        with st.expander("📊 Overall System Metrics"):
-                            c1, c2, c3 = st.columns(3)
-                            c1.metric("Overall Win %", f"{win_rate:.1f}%")
-                            c2.metric("L7 Win %",      f"{l7_win_rate:.1f}%")
-                            c3.metric("System Score",  f"{sys_score:g}")
-
+                        # Deep analytics (calibration, Brier, tier breakdowns, threshold
+                        # sweep) intentionally live OFF-page now: the data is all saved,
+                        # and the Export button + backtest.py recompute them on demand.
                         st.markdown("#### Recent Graded Logs")
                         cols_show = ['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']
                         if 'odds_line' in df_active.columns:
@@ -2043,8 +1928,7 @@ if data and data.get('totalGames', 0) > 0:
                                        json={"graded": 0, "actual_ks": 0}, headers=DB_HEADERS)
                         except Exception:
                             pass
-                        st.session_state['last_autograde_time'] = None  # bypass 30-min guard
-                        auto_grade_past_predictions()
+                        auto_grade_worker()   # run synchronously — user wants results now
                         load_pitching_predictions.clear()
                     st.rerun()
 
@@ -2087,69 +1971,6 @@ if data and data.get('totalGames', 0) > 0:
                                      hide_index=True, use_container_width=True)
                 else:
                     st.info("No pitcher predictions yet.")
-
-    # ----------------------------------------------------------
-    # TAB 4 — DEEP DIVE (unchanged)
-    # ----------------------------------------------------------
-    with tab4:
-        st.markdown("### 🔍 Batter Deep Dive")
-        red_hitters = sorted(hitters.keys())
-        sel_hitter  = st.selectbox("Select Reds Batter", red_hitters)
-        h_id        = hitters[sel_hitter]
-        adv_hit     = get_advanced_hitting(h_id, current_year)
-        ov_hit      = get_season_stats(h_id, "hitting", current_year)
-        league_stats = get_league_hitting(current_year)
-
-        ops_plus = "N/A"
-        try:
-            ops_plus = calculate_ops_plus(ov_hit['stats'][0]['splits'][0]['stat'], league_stats)
-        except Exception:
-            pass
-
-        if adv_hit:
-            st.markdown("#### Advanced Metrics")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("OPS+",  ops_plus)
-            c2.metric("BABIP", adv_hit.get('babip', '.000'))
-            c3.metric("ISO",   adv_hit.get('iso', '.000'))
-            try:    c4.metric("K%",  f"{float(adv_hit.get('strikeoutsPerPlateAppearance', 0))*100:.1f}%")
-            except Exception: c4.metric("K%",  "N/A")
-            try:    c5.metric("BB%", f"{float(adv_hit.get('walksPerPlateAppearance', 0))*100:.1f}%")
-            except Exception: c5.metric("BB%", "N/A")
-            st.divider()
-
-        c_l, c_r = st.columns(2)
-        with c_l:
-            st.markdown("#### vs LHP")
-            try:
-                s = get_season_stats(h_id, "hitting", current_year, split="vl")['stats'][0]['splits'][0]['stat']
-                st.markdown(f"**AVG:** {s.get('avg', '.000')} | **OPS:** {s.get('ops', '.000')} | **HR:** {s.get('homeRuns', 0)}")
-            except Exception:
-                st.info("No stats vs LHP.")
-        with c_r:
-            st.markdown("#### vs RHP")
-            try:
-                s = get_season_stats(h_id, "hitting", current_year, split="vr")['stats'][0]['splits'][0]['stat']
-                st.markdown(f"**AVG:** {s.get('avg', '.000')} | **OPS:** {s.get('ops', '.000')} | **HR:** {s.get('homeRuns', 0)}")
-            except Exception:
-                st.info("No stats vs RHP.")
-
-        st.divider()
-        st.markdown("#### Last 10 Games")
-        logs = get_game_logs(h_id, current_year)
-        if logs:
-            l10_list = []
-            for l in logs[-10:]:
-                s = l.get('stat', {})
-                l10_list.append({
-                    "Date": l.get('date', ''),
-                    "Opp":  l.get('opponent', {}).get('name', ''),
-                    "Hits": s.get('hits', 0),
-                    "HR":   s.get('homeRuns', 0),
-                    "K":    s.get('strikeOuts', 0)
-                })
-            st.dataframe(pd.DataFrame(l10_list).sort_values(by="Date", ascending=False),
-                         hide_index=True, use_container_width=True)
 
     # ----------------------------------------------------------
     # TAB 5 — LOCK OF THE DAY (league-wide strikeout edge hunter)
