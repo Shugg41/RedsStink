@@ -195,6 +195,60 @@ def get_league_schedule(date_str):
 # ============================================================
 # ODDS API (pure: returns (result, messages) — the app displays messages)
 # ============================================================
+def _better(price_a, price_b):
+    """American-odds comparison for the bettor: higher number = better payout
+    (-105 beats -120; +150 beats +100)."""
+    if price_a is None: return price_b
+    if price_b is None: return price_a
+    return max(price_a, price_b)
+
+def parse_batter_odds(game_json):
+    """Parse an event-odds response (ALL books) into per-player records:
+    DraftKings as the reference line, plus the best price across books at the
+    same line. Pure — unit tested with fixture JSON."""
+    odds_dict = {}
+    for book in (game_json or {}).get('bookmakers', []):
+        bkey  = book.get('key', '')
+        btitle = book.get('title', bkey)
+        is_dk = (bkey == 'draftkings')
+        for market in book.get('markets', []):
+            mkey = market.get('key')
+            if mkey not in ('batter_hits', 'batter_hits_runs_rbis'):
+                continue
+            prefix = '' if mkey == 'batter_hits' else 'hrr_'
+            for outcome in market.get('outcomes', []):
+                if outcome.get('name') != 'Over':
+                    continue
+                nm  = normalize_name(outcome.get('description', ''))
+                if not nm:
+                    continue
+                rec   = odds_dict.setdefault(nm, {})
+                point = outcome.get('point', 0.5)
+                price = outcome.get('price', 0)
+                if is_dk:
+                    rec[prefix + 'line']  = point
+                    rec[prefix + 'price'] = price
+                # track the best price per (market, point) across all books
+                offers = rec.setdefault(prefix + '_offers', {})
+                cur = offers.get(point)
+                if cur is None or _better(price, cur[0]) == price:
+                    offers[point] = (price, btitle)
+    # resolve "best at DK's line" (fall back to any line when DK absent)
+    for rec in odds_dict.values():
+        for prefix in ('', 'hrr_'):
+            offers = rec.pop(prefix + '_offers', {})
+            if not offers:
+                continue
+            ref = rec.get(prefix + 'line')
+            if ref is None and offers:
+                ref = sorted(offers.keys())[0]
+                rec[prefix + 'line'] = ref
+                rec[prefix + 'price'] = None
+            best = offers.get(ref)
+            if best:
+                rec[prefix + 'best_price'], rec[prefix + 'best_book'] = best
+    return odds_dict
+
 def fetch_reds_batter_odds(odds_api_key):
     """DraftKings batter_hits + HRR lines for the Reds game.
     Returns (odds_dict, messages). ~1-2 Odds API credits."""
@@ -220,13 +274,14 @@ def fetch_reds_batter_odds(odds_api_key):
             msgs.append(("warning", "No Reds game found on the odds provider's slate for today."))
             return {}, msgs
 
+        # NOTE: no bookmakers filter — one call returns EVERY US book for the
+        # same credit cost, which is what makes line shopping free.
         o_res = http_get(
             f"{ODDS_BASE}/events/{reds_event_id}/odds",
             params={
                 "apiKey": odds_api_key,
                 "regions": "us",
                 "markets": "batter_hits,batter_hits_runs_rbis",
-                "bookmakers": "draftkings",
                 "oddsFormat": "american",
             }
         )
@@ -234,24 +289,7 @@ def fetch_reds_batter_odds(odds_api_key):
             msgs.append(("error", f"Odds API (Reds event) failed: {o_res.text[:200]}"))
             return {}, msgs
 
-        odds_dict = {}
-        game = o_res.json()
-        for book in game.get('bookmakers', []):
-            for market in book.get('markets', []):
-                mkey = market.get('key')
-                if mkey not in ('batter_hits', 'batter_hits_runs_rbis'):
-                    continue
-                for outcome in market.get('outcomes', []):
-                    if outcome.get('name') != 'Over':
-                        continue
-                    nm  = normalize_name(outcome.get('description', ''))
-                    rec = odds_dict.setdefault(nm, {})
-                    if mkey == 'batter_hits':
-                        rec['line']  = outcome.get('point', 0.5)
-                        rec['price'] = outcome.get('price', 0)
-                    else:  # batter_hits_runs_rbis
-                        rec['hrr_line']  = outcome.get('point', 0.5)
-                        rec['hrr_price'] = outcome.get('price', 0)
+        odds_dict = parse_batter_odds(o_res.json())
         if not odds_dict:
             msgs.append(("warning", "Found the Reds game, but no DraftKings batter lines are "
                                     "posted yet (often not until a few hours before first pitch)."))
@@ -260,9 +298,54 @@ def fetch_reds_batter_odds(odds_api_key):
         msgs.append(("error", f"Odds API error: {str(e)}"))
         return {}, msgs
 
+def parse_k_odds(game_json, out=None):
+    """Parse one event's pitcher_strikeouts markets (ALL books) into per-pitcher
+    records: DK reference line/prices + best over/under across books at the
+    same line. Pure — unit tested with fixture JSON."""
+    out = out if out is not None else {}
+    for book in (game_json or {}).get('bookmakers', []):
+        is_dk  = (book.get('key') == 'draftkings')
+        btitle = book.get('title', book.get('key', ''))
+        for market in book.get('markets', []):
+            if market.get('key') != 'pitcher_strikeouts':
+                continue
+            for o in market.get('outcomes', []):
+                nm = normalize_name(o.get('description', ''))
+                if not nm:
+                    continue
+                rec   = out.setdefault(nm, {'line': None,
+                                            'over_price': None, 'under_price': None})
+                point = o.get('point')
+                price = o.get('price')
+                side  = 'over' if o.get('name') == 'Over' else 'under'
+                if is_dk:
+                    if point is not None:
+                        rec['line'] = point
+                    rec[f'{side}_price'] = price
+                offers = rec.setdefault(f'_{side}_offers', {})
+                cur = offers.get(point)
+                if cur is None or _better(price, cur[0]) == price:
+                    offers[point] = (price, btitle)
+    return out
+
+def _resolve_k_best(out):
+    for rec in out.values():
+        ref = rec.get('line')
+        for side in ('over', 'under'):
+            offers = rec.pop(f'_{side}_offers', {})
+            if not offers:
+                continue
+            if ref is None:
+                ref = sorted(k for k in offers.keys() if k is not None)[0] if offers else None
+                rec['line'] = ref
+            best = offers.get(ref)
+            if best:
+                rec[f'{side}_best_price'], rec[f'{side}_best_book'] = best
+    return out
+
 def fetch_pitcher_strikeout_odds(odds_api_key, cap=None):
-    """League-wide DraftKings pitcher_strikeouts lines keyed by normalized name.
-    Returns (dict, messages). ~1 credit per event — on-demand only."""
+    """League-wide pitcher_strikeouts lines (all US books; DK as reference)
+    keyed by normalized name. Returns (dict, messages). ~1 credit per event."""
     msgs = []
     if not odds_api_key:
         return {}, msgs
@@ -281,32 +364,16 @@ def fetch_pitcher_strikeout_odds(odds_api_key, cap=None):
                 continue
             r = http_get(f"{ODDS_BASE}/events/{eid}/odds", params={
                 "apiKey": odds_api_key, "regions": "us",
-                "markets": "pitcher_strikeouts", "bookmakers": "draftkings",
+                "markets": "pitcher_strikeouts",
                 "oddsFormat": "american",
             })
             if r.status_code != 200:
                 continue
-            game = r.json()
-            for book in game.get('bookmakers', []):
-                for market in book.get('markets', []):
-                    if market.get('key') != 'pitcher_strikeouts':
-                        continue
-                    for o in market.get('outcomes', []):
-                        nm = normalize_name(o.get('description', ''))
-                        if not nm:
-                            continue
-                        rec = out.setdefault(nm, {'line': o.get('point'),
-                                                  'over_price': None, 'under_price': None})
-                        if o.get('point') is not None:
-                            rec['line'] = o.get('point')
-                        if o.get('name') == 'Over':
-                            rec['over_price'] = o.get('price')
-                        elif o.get('name') == 'Under':
-                            rec['under_price'] = o.get('price')
-        return out, msgs
+            parse_k_odds(r.json(), out)
+        return _resolve_k_best(out), msgs
     except Exception as ex:
         msgs.append(("error", f"Odds API (pitcher Ks) error: {ex}"))
-        return out, msgs
+        return _resolve_k_best(out), msgs
 
 
 # ============================================================

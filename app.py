@@ -609,13 +609,25 @@ def render_player_card(row, split_label, idx):
 
     dk_info = row.get('DK_Info', {}) or {}
     badges = []
+
+    def _p(v): return f"+{v}" if v > 0 else str(v)
+    def _shop(prefix):
+        """'· best FD −118' suffix when another book beats DK at the same line."""
+        best, book = dk_info.get(prefix + 'best_price'), dk_info.get(prefix + 'best_book')
+        dkp = dk_info.get(prefix + 'price')
+        if best is None or book is None or 'DraftKings' in str(book):
+            return ""
+        if dkp is not None and best <= dkp:
+            return ""
+        return (f' <span style="color:#4caf50;">· best {html.escape(str(book))} {_p(best)}</span>')
+
     if dk_info.get('price') is not None and dk_info.get('line') is not None:
-        p = dk_info['price']; ps = f"+{p}" if p > 0 else str(p)
-        badges.append(f'<span class="dk-badge">DK Hits: O {dk_info["line"]} ({ps})</span>')
+        badges.append(f'<span class="dk-badge">DK Hits: O {dk_info["line"]} ({_p(dk_info["price"])})'
+                      f'{_shop("")}</span>')
     if dk_info.get('hrr_price') is not None and dk_info.get('hrr_line') is not None:
-        hp = dk_info['hrr_price']; hps = f"+{hp}" if hp > 0 else str(hp)
         plus = int(dk_info['hrr_line'] + 0.5)   # O/U line -> "X+" framing (O 1.5 = 2+ HRR)
-        badges.append(f'<span class="dk-badge" style="background:#5a2d8a;">DK HRR: {plus}+ ({hps})</span>')
+        badges.append(f'<span class="dk-badge" style="background:#5a2d8a;">DK HRR: {plus}+ '
+                      f'({_p(dk_info["hrr_price"])}){_shop("hrr_")}</span>')
     dk_html = " ".join(badges) if badges else '<span class="dk-badge no-odds">No DK Line</span>'
 
     bvp_display = f"{row['BVP_Avg']:.3f}" if row['BVP_Avg'] > 0 else "—"
@@ -785,6 +797,12 @@ def render_lock(lock, shortlist, n_scanned):
 
     st.markdown(f"#### 🎯 Lock of the Day · {emoji} {conf} confidence")
     st.markdown(f"## {lock['pitcher_name']} — {side} {lock['line']} Ks  ({price_str})")
+    # 🛒 line shopping: shout when another book pays better on this side
+    _bp  = lock.get(f"{side.lower()}_best_price")
+    _bb  = lock.get(f"{side.lower()}_best_book")
+    if (_bp is not None and _bb and 'DraftKings' not in str(_bb)
+            and (price is None or _bp > price)):
+        st.success(f"🛒 Better price available: **{_bb} {'+' if _bp > 0 else ''}{_bp}** on the same line")
     st.caption(f"{lock.get('team_name','')} vs {lock.get('opp_team_name','')} · "
                f"{lock.get('park_name','')} · scanned {n_scanned} priced starters")
 
@@ -882,6 +900,10 @@ def render_lock_of_the_day(date_str, current_year):
                     return {**p, 'projection': proj, 'line': dkline.get('line'),
                             'over_price': dkline.get('over_price'),
                             'under_price': dkline.get('under_price'),
+                            'over_best_price': dkline.get('over_best_price'),
+                            'over_best_book': dkline.get('over_best_book'),
+                            'under_best_price': dkline.get('under_best_price'),
+                            'under_best_book': dkline.get('under_best_book'),
                             'opener': meta.get('opener', False),
                             'data_ok': meta.get('data_ok', True),
                             'receipt': receipt}
