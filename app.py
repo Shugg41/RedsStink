@@ -50,6 +50,10 @@ try:
     import sim
 except Exception:
     sim = None
+try:
+    import live
+except Exception:
+    live = None
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -1166,10 +1170,11 @@ if data and data.get('totalGames', 0) > 0:
     # ============================================================
     # TABS
     # ============================================================
-    tab1, tab2, tab_sim, tab3, tab5 = st.tabs([
+    tab1, tab2, tab_sim, tab_live, tab3, tab5 = st.tabs([
         "🔥 Offense Top Matchups",
         "⚡ Strikeout Engine",
         "🎲 Simulator",
+        "📺 Live",
         "📊 System Tracker",
         "🎯 Lock of the Day"
     ])
@@ -1553,6 +1558,97 @@ if data and data.get('totalGames', 0) > 0:
     # ----------------------------------------------------------
     with tab5:
         render_lock_of_the_day(date_str, current_year)
+
+    # ----------------------------------------------------------
+    # TAB — 📺 LIVE SWEAT TRACKER
+    # ----------------------------------------------------------
+    with tab_live:
+        st.markdown("### 📺 Live Sweat Tracker")
+        if live is None:
+            st.warning("Live module loading (deploy settling) — refresh in a minute.")
+        else:
+            get_live_feed_fresh = st.cache_data(ttl=45)(data.get_live_feed)
+            snap = live.live_snapshot(get_live_feed_fresh(game_pk))
+            if st.button("🔄 Refresh", key="live_refresh"):
+                get_live_feed_fresh.clear()
+                st.rerun()
+
+            if not snap or snap.get('inning', 0) == 0:
+                st.info(f"Game hasn't started (first pitch {start_time_est}). "
+                        "Come back during the game to sweat your bets live.")
+            else:
+                half_emoji = "▲" if snap['half'] == 'top' else "▼"
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Reds", snap['reds_runs'])
+                sc2.metric(opponent, snap['opp_runs'])
+                sc3.metric("Inning", f"{half_emoji} {snap['inning']}")
+                if snap.get('status_code') in live.FINAL_CODES:
+                    st.caption("Final. Results will grade automatically shortly.")
+
+                innings_left = live.remaining_offense_innings(
+                    snap['inning'], snap['half'], snap['reds_home'])
+
+                # --- tracked hitters: today's saved picks + live box score ---
+                picks = []
+                if SUPABASE_URL:
+                    try:
+                        res = http_get(
+                            f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}"
+                            f"&player_id=gt.0&select=player_id,player_name,score,tier"
+                            f"&order=score.desc&limit=9", headers=DB_HEADERS)
+                        picks = res.json() if res.status_code == 200 else []
+                    except Exception:
+                        picks = []
+                proj_by_id = {r['Player_ID']: r for r in
+                              (st.session_state.get('scan_results') or [])} \
+                             if st.session_state.get('scan_date') == date_str else {}
+
+                if picks:
+                    st.markdown("#### 🧍 Your board, live")
+                    rows = []
+                    for p in picks:
+                        stat = snap['batting'].get(p['player_id'])
+                        hrr_now = (stat['hits'] + stat['runs'] + stat['rbi']) if stat else 0
+                        hits_now = stat['hits'] if stat else 0
+                        proj = proj_by_id.get(p['player_id'], {})
+                        pc = ""
+                        if proj.get('HRR_Proj'):
+                            pc = f"{live.hitter_p_clear(hrr_now, 1.5, proj['HRR_Proj'], innings_left)*100:.0f}%"
+                        rows.append({
+                            "Player": p['player_name'],
+                            "Hits":   hits_now,
+                            "HRR":    hrr_now,
+                            "2+ HRR": "✅" if hrr_now >= 2 else ("1 away" if hrr_now == 1 else "needs 2"),
+                            "P(2+ HRR)": pc or "—",
+                        })
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                    if not proj_by_id:
+                        st.caption("Tip: run the 🔥 Offense board earlier in the day to get live "
+                                   "P(clear) percentages here.")
+
+                # --- starters' K lines live ---
+                if SUPABASE_URL:
+                    try:
+                        res = http_get(
+                            f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}"
+                            f"&select=player_id,player_name,projected_ks", headers=DB_HEADERS)
+                        kp = res.json() if res.status_code == 200 else []
+                    except Exception:
+                        kp = []
+                    if kp:
+                        st.markdown("#### ⚡ Strikeouts, live")
+                        krows = []
+                        for r in kp:
+                            pstat = snap['pitching'].get(r['player_id'], {})
+                            ks_now = pstat.get('ks', 0)
+                            pc = live.starter_p_clear(ks_now, 5.5, r['projected_ks'],
+                                                      5.7, pstat.get('outs', 0))
+                            krows.append({"Pitcher": r['player_name'],
+                                          "Ks now": ks_now,
+                                          "Projected": r['projected_ks'],
+                                          "IP": f"{pstat.get('outs', 0)/3:.1f}",
+                                          "P(6+ Ks)": f"{live.starter_p_clear(ks_now, 5.5, r['projected_ks'], 5.7, pstat.get('outs', 0))*100:.0f}%"})
+                        st.dataframe(pd.DataFrame(krows), hide_index=True, use_container_width=True)
 
     # ----------------------------------------------------------
     # TAB — 🎲 SIMULATOR (10,000 Monte Carlo games)
