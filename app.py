@@ -54,6 +54,10 @@ try:
     import live
 except Exception:
     live = None
+try:
+    import ai
+except Exception:
+    ai = None
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -323,6 +327,12 @@ try:
     NTFY_TOPIC = st.secrets["NTFY_TOPIC"]
 except Exception:
     NTFY_TOPIC = "redsstink-briefing-rk84vq"
+
+# Optional: enables the 🤖 Ask-the-app panel (costs pennies per question)
+try:
+    ANTHROPIC_API_KEY = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:
+    ANTHROPIC_API_KEY = None
 
 # ============================================================
 # SESSION STATE INIT
@@ -1066,6 +1076,13 @@ if SUPABASE_URL and briefing is not None and not st.session_state.get('autorun_k
                     db_headers_upsert=DB_HEADERS_UPSERT,
                     odds_api_key=ODDS_API_KEY, ntfy_topic=NTFY_TOPIC),
         daemon=True).start()
+    # Evening pass: capture near-close odds for CLV (no-ops until 5pm ET,
+    # and stays dormant unless the closing_line/closing_price columns exist)
+    threading.Thread(
+        target=briefing.closing_snapshot,
+        kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
+                    db_headers_upsert=DB_HEADERS_UPSERT, odds_api_key=ODDS_API_KEY),
+        daemon=True).start()
 
 # ============================================================
 # SIDEBAR
@@ -1077,14 +1094,44 @@ with st.sidebar:
     date_str      = selected_date.strftime("%Y-%m-%d")
     current_year  = selected_date.year
 
-    data     = get_schedule(date_str)
+    sched_data = get_schedule(date_str)
     game_idx = 0
-    if data and data.get('totalGames', 0) > 1:
+    if sched_data and sched_data.get('totalGames', 0) > 1:
         st.warning("⚾ Doubleheader Detected!")
-        games_list   = data['dates'][0]['games']
+        games_list   = sched_data['dates'][0]['games']
         game_choices = [f"Game {i+1}" for i in range(len(games_list))]
         sel_game     = st.selectbox("Select Matchup", game_choices)
         game_idx     = game_choices.index(sel_game)
+
+    # --- 🤖 Ask the app (optional; needs ANTHROPIC_API_KEY secret) ---
+    with st.expander("🤖 Ask the app"):
+        if ai is None or not ANTHROPIC_API_KEY:
+            st.caption("Add an `ANTHROPIC_API_KEY` to the app secrets to enable a "
+                       "Claude-powered Q&A over today's board and your results "
+                       "(costs pennies per question).")
+        else:
+            q = st.text_input("Ask about today's board or your results",
+                              placeholder="Should I touch Elly tonight?", key="ai_q")
+            if st.button("Ask", key="ai_ask") and q:
+                with st.spinner("Thinking..."):
+                    picks, kproj = [], []
+                    if SUPABASE_URL:
+                        try:
+                            r = http_get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{date_str}"
+                                         f"&player_id=gt.0&select=player_name,score,tier,odds_price"
+                                         f"&order=score.desc&limit=12", headers=DB_HEADERS)
+                            picks = r.json() if r.status_code == 200 else []
+                            r = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{date_str}"
+                                         f"&select=player_name,projected_ks", headers=DB_HEADERS)
+                            kproj = r.json() if r.status_code == 200 else []
+                        except Exception:
+                            pass
+                    ctx_text = ai.build_context(picks, kproj, None, date_str)
+                    answer, err = ai.ask(ANTHROPIC_API_KEY, q, ctx_text)
+                if answer:
+                    st.info(answer)
+                else:
+                    st.warning(f"Couldn't get an answer ({err}).")
 
 # ============================================================
 # MAIN
@@ -1105,8 +1152,8 @@ roster_res = get_roster(113)
 hitters    = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] != 'P'}
 pitchers   = {p['person']['fullName']: p['person']['id'] for p in roster_res if p['position']['abbreviation'] == 'P'}
 
-if data and data.get('totalGames', 0) > 0:
-    game     = data['dates'][0]['games'][game_idx]
+if sched_data and sched_data.get('totalGames', 0) > 0:
+    game     = sched_data['dates'][0]['games'][game_idx]
     game_pk  = game['gamePk']
     park_name = game.get('venue', {}).get('name', 'Unknown')
 
@@ -1489,6 +1536,24 @@ if data and data.get('totalGames', 0) > 0:
                         # Deep analytics (calibration, Brier, tier breakdowns, threshold
                         # sweep) intentionally live OFF-page now: the data is all saved,
                         # and the Export button + backtest.py recompute them on demand.
+
+                        # --- 📈 Closing Line Value (activates once closing odds exist) ---
+                        if 'closing_price' in df_active.columns:
+                            clv_df = df_active.dropna(subset=['closing_price', 'odds_price'])
+                            if not clv_df.empty:
+                                _imp = american_to_implied_prob
+                                clv = clv_df.apply(lambda r: _imp(r['closing_price']) - _imp(r['odds_price']),
+                                                   axis=1)
+                                beat = (clv > 0).mean() * 100
+                                st.markdown("#### 📈 Closing Line Value")
+                                cv1, cv2 = st.columns(2)
+                                cv1.metric("Avg CLV", f"{clv.mean()*100:+.1f} pts",
+                                           help="Positive = the market moved TOWARD your picks after "
+                                                "you got your number — the truest sign of real edge.")
+                                cv2.metric("Beat the close", f"{beat:.0f}%",
+                                           help=f"{len(clv_df)} picks with both open + close captured")
+                                st.divider()
+
                         st.markdown("#### Recent Graded Logs")
                         cols_show = ['date', 'player_name', 'score', 'tier', 'opp_pitcher', 'actual_hits', 'win']
                         if 'odds_line' in df_active.columns:

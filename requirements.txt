@@ -1,7 +1,7 @@
 # Pinned floors so deploys are reproducible. Editing this file also forces
 # Streamlit Cloud to do a full clean rebuild (not just a partial code reload),
 # which clears any stale in-memory module state.
-# build-marker: 18  (bump to force a clean rebuild after helper-module changes)
+# build-marker: 19  (bump to force a clean rebuild after helper-module changes)
 streamlit>=1.30
 requests>=2.28
 pandas>=2.0
