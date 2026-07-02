@@ -15,6 +15,10 @@ import dateutil.parser
 import data
 import pipeline
 from engine import calculate_fip
+try:
+    import savant
+except Exception:
+    savant = None
 
 MARKER_PLAYER_ID = 0
 MARKER_NAME = "_autorun"
@@ -154,10 +158,18 @@ def daily_autorun(supabase_url, db_headers, db_headers_upsert,
         side = 'away' if 'Reds' in ctx.get('away_team', '') else 'home'
         batting_order = box.get(side, {}).get('battingOrder', []) or []
 
+        sv_batters = {}
+        if savant is not None:
+            try:
+                sv_batters = savant.fetch_batter_quality(year)
+            except Exception:
+                sv_batters = {}
+
         scan_results = pipeline.score_hitters(
             data, list(hitters.items()), year, split_code, split_label,
             batting_order, ctx['park_name'], pitcher_score, opp_fip_val,
-            bullpen_era, live_odds, ctx['opp_pitcher_id'])
+            bullpen_era, live_odds, ctx['opp_pitcher_id'],
+            savant_batters=sv_batters)
 
         if scan_results:
             data.http_post(
