@@ -1,5 +1,10 @@
-# Pings the Streamlit app on a schedule so Community Cloud never puts it to
+# Visits the Streamlit app on a schedule so Community Cloud never puts it to
 # sleep — cold "waking up..." loads were taking 30-60s+.
+#
+# Uses a real headless Chrome visit (via puppeteer-core + the runner's
+# preinstalled Chrome) because Streamlit's front door bounces plain curl in a
+# redirect loop, and only a real browser session registers as a viewer. If the
+# app somehow hibernated anyway, the script presses Streamlit's wake-up button.
 #
 # The APP_URL repository variable (Settings -> Secrets and variables ->
 # Actions -> Variables) overrides the default below if the app ever moves.
@@ -14,10 +19,34 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Visit the app
+      - name: Visit the app with a real browser
         env:
           APP_URL: ${{ vars.APP_URL || 'https://redsstink1.streamlit.app' }}
         run: |
-          echo "Pinging $APP_URL"
-          curl -sSL --max-time 90 -o /dev/null -w "page: HTTP %{http_code}\n" "$APP_URL"
-          curl -sSL --max-time 30 -o /dev/null -w "health: HTTP %{http_code}\n" "${APP_URL%/}/_stcore/health" || true
+          npm install --no-save --silent puppeteer-core@22
+          node <<'EOF'
+          const p = require('puppeteer-core');
+          (async () => {
+            const browser = await p.launch({
+              executablePath: '/usr/bin/google-chrome',
+              args: ['--no-sandbox'],
+            });
+            const page = await browser.newPage();
+            console.log('Visiting', process.env.APP_URL);
+            await page.goto(process.env.APP_URL, { waitUntil: 'networkidle2', timeout: 90000 });
+
+            // If the app hibernated anyway, Streamlit shows a wake-up page with a
+            // single button — press it and give the app time to boot. (Never
+            // clicks buttons on the live app itself.)
+            const text = await page.evaluate(() => document.body.innerText || '');
+            if (/back up|zzzz/i.test(text)) {
+              console.log('App was asleep — pressing the wake-up button...');
+              await page.click('button').catch(() => {});
+              await new Promise(r => setTimeout(r, 30000));
+            }
+
+            await new Promise(r => setTimeout(r, 15000)); // linger so the visit registers
+            console.log('Visited OK. Page title:', await page.title());
+            await browser.close();
+          })().catch(err => { console.error('Visit failed:', err.message); process.exit(1); });
+          EOF
