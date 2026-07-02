@@ -155,6 +155,7 @@ def score_hitters(fetch, to_score, year, split_code, split_label,
         k_pct_val, iso_val = 0.22, 0.140
         ov_data  = blob.get('ov_data') or {}
         adv_hit  = blob.get('adv_hit') or {}
+        psb = {}
         try:
             psb        = ov_data['stats'][0]['splits'][0]['stat']
             overall_avg = psb.get('avg', '.000')
@@ -250,7 +251,8 @@ def score_hitters(fetch, to_score, year, split_code, split_label,
             "BABIP": babip, "K_Pct": k_pct_val, "ISO": iso_val, "Opp_FIP": opp_fip_val,
             "HRR_Proj": hrr_proj, "HRR_P2": hrr_p2,
             "xBA": sv.get('xba'), "Luck": (luck[0] if luck else None),
-            "Luck_Delta": (luck[1] if luck else None), "Brl_Pct": sv.get('brl_percent')
+            "Luck_Delta": (luck[1] if luck else None), "Brl_Pct": sv.get('brl_percent'),
+            "Season_Stat": psb   # raw counting stats — feeds the game simulator
         })
 
     return scan_results

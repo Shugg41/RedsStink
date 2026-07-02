@@ -46,6 +46,10 @@ try:
     import savant
 except Exception:  # Statcast is an enhancement, never a dependency
     savant = None
+try:
+    import sim
+except Exception:
+    sim = None
 
 # Streamlit ScriptRunContext lets cached fetchers run inside worker threads
 # without spamming "missing ScriptRunContext" warnings. Degrade gracefully if
@@ -497,9 +501,11 @@ get_pitcher_hand     = st.cache_data(ttl=86400)(data.get_pitcher_hand)
 get_league_schedule  = st.cache_data(ttl=1800)(data.get_league_schedule)
 
 if savant is not None:
-    get_savant_batters = st.cache_data(ttl=86400)(savant.fetch_batter_quality)
+    get_savant_batters  = st.cache_data(ttl=86400)(savant.fetch_batter_quality)
+    get_savant_pitchers = st.cache_data(ttl=86400)(savant.fetch_pitcher_xstats)
 else:
     def get_savant_batters(year): return {}
+    def get_savant_pitchers(year): return {}
 
 class _CachedFetch:
     """Namespace handing the pipeline the CACHED fetchers (interactive path)."""
@@ -1138,9 +1144,10 @@ if data and data.get('totalGames', 0) > 0:
     # ============================================================
     # TABS
     # ============================================================
-    tab1, tab2, tab3, tab5 = st.tabs([
+    tab1, tab2, tab_sim, tab3, tab5 = st.tabs([
         "🔥 Offense Top Matchups",
         "⚡ Strikeout Engine",
+        "🎲 Simulator",
         "📊 System Tracker",
         "🎯 Lock of the Day"
     ])
@@ -1266,6 +1273,16 @@ if data and data.get('totalGames', 0) > 0:
                     progress_cb=lambda frac, nm: pb.progress(frac, text=f"Scoring {nm}..."),
                     thread_hook=_st_thread_hook, savant_batters=sv_batters)
                 pb.empty()
+
+                # Stash for the Simulator / Live tabs (same session)
+                st.session_state['scan_results'] = scan_results
+                st.session_state['scan_date']    = date_str
+                st.session_state['game_meta']    = {
+                    'opp_pitcher_id': opp_pitcher_id, 'opp_pitcher_name': opp_pitcher_name,
+                    'park_name': park_name, 'bullpen_era': bullpen_era,
+                    'game_pk': game_pk, 'opponent': opponent,
+                    'batting_order': reds_batting_order,
+                }
 
                 # --- Save to Supabase (UPSERT w/ odds at pick time) ---
                 if SUPABASE_URL:
@@ -1514,6 +1531,99 @@ if data and data.get('totalGames', 0) > 0:
     # ----------------------------------------------------------
     with tab5:
         render_lock_of_the_day(date_str, current_year)
+
+    # ----------------------------------------------------------
+    # TAB — 🎲 SIMULATOR (10,000 Monte Carlo games)
+    # ----------------------------------------------------------
+    with tab_sim:
+        st.markdown("### 🎲 Game Simulator")
+        st.caption("Plays tonight's Reds offense **10,000 times** — every PA rolled from real "
+                   "outcome rates vs this starter, bullpen, and park. Team total, F5, hitter "
+                   "props, and parlay correlation all come from the SAME simulated games.")
+
+        sr   = st.session_state.get('scan_results')
+        meta = st.session_state.get('game_meta') or {}
+        if sim is None:
+            st.warning("Simulator module not loaded (deploy settling) — refresh in a minute.")
+        elif not sr or st.session_state.get('scan_date') != date_str:
+            st.info("Run the **Offensive Engine** first (🔥 tab) — the simulator builds its "
+                    "lineup from that board.")
+        else:
+            if st.button("🎲 Run 10,000 game simulations", type="primary"):
+                with st.spinner("Simulating 10,000 games..."):
+                    by_id = {r['Player_ID']: r for r in sr}
+                    order = [pid for pid in (meta.get('batting_order') or []) if pid in by_id]
+                    if len(order) < 9:   # no confirmed lineup -> top 9 by score
+                        ranked = sorted(sr, key=lambda r: -r['Score'])
+                        order = [r['Player_ID'] for r in ranked[:9]]
+                    lineup = [sim.hitter_profile(by_id[pid].get('Season_Stat') or {},
+                                                 name=by_id[pid]['Player'], player_id=pid)
+                              for pid in order[:9]]
+
+                    adv_p = get_advanced_pitching(meta.get('opp_pitcher_id'), current_year) \
+                            if meta.get('opp_pitcher_id') else {}
+                    sv_p  = get_savant_pitchers(current_year).get(meta.get('opp_pitcher_id'), {})
+                    opp_prof = sim.pitcher_profile(adv_p, xba_against=sv_p.get('xba'))
+                    _, _, k_meta = run_strikeout_engine(
+                        meta.get('opp_pitcher_id'), meta.get('opp_pitcher_name', ''),
+                        113, "Cincinnati Reds", meta.get('park_name', ''), current_year)
+
+                    results = sim.simulate_games(
+                        lineup, opp_prof,
+                        bullpen_era=meta.get('bullpen_era', 4.2),
+                        park_name=meta.get('park_name', ''),
+                        starter_exp_ip=k_meta.get('exp_ip', 5.5),
+                        n_sims=10000, seed=int(game_pk or 1))
+                    st.session_state['sim_results'] = results
+                    st.session_state['sim_order']   = order[:9]
+                    st.session_state['sim_names']   = {pid: by_id[pid]['Player'] for pid in order[:9]}
+
+            results = st.session_state.get('sim_results')
+            if results:
+                names = st.session_state.get('sim_names', {})
+
+                st.markdown("#### 🏟️ Reds Team Total")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Mean runs", f"{sim.mean(results['team_runs']):.2f}")
+                m2.metric("P(over 3.5)", f"{sim.p_over(results['team_runs'], 3.5)*100:.0f}%")
+                m3.metric("P(over 4.5)", f"{sim.p_over(results['team_runs'], 4.5)*100:.0f}%")
+                m4.metric("P(F5 over 2.5)", f"{sim.p_over(results['f5_runs'], 2.5)*100:.0f}%")
+
+                st.markdown("#### 🧍 Hitter probabilities (from the same 10,000 games)")
+                rows = []
+                for pid in st.session_state.get('sim_order', []):
+                    h = results['hitters'].get(pid)
+                    if not h:
+                        continue
+                    rows.append({
+                        "Player":   names.get(pid, pid),
+                        "P(1+ hit)":  f"{sim.p_over(h['H'], 0.5)*100:.0f}%",
+                        "P(2+ hits)": f"{sim.p_over(h['H'], 1.5)*100:.0f}%",
+                        "P(2+ HRR)":  f"{sim.p_over(h['HRR'], 1.5)*100:.0f}%",
+                        "P(2+ TB)":   f"{sim.p_over(h['TB'], 1.5)*100:.0f}%",
+                        "Mean HRR":   f"{sim.mean(h['HRR']):.2f}",
+                    })
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+                st.markdown("#### 🔗 Same-game parlay correlation")
+                st.caption("How much MORE often two legs hit **together** than independent "
+                           "pricing assumes. Boost > 1.10 = the SGP is underpriced by naive math.")
+                sgp_rows = []
+                for pid in st.session_state.get('sim_order', []):
+                    h = results['hitters'].get(pid)
+                    if not h:
+                        continue
+                    edge = sim.sgp_edge(h['HRR'], 1.5, results['team_runs'], 4.5)
+                    if edge:
+                        sgp_rows.append({"Leg A": f"{names.get(pid, pid)} 2+ HRR",
+                                         "Leg B": "Reds over 4.5 runs",
+                                         "Joint %": f"{sim.joint_prob(h['HRR'], 1.5, results['team_runs'], 4.5)*100:.0f}%",
+                                         "Correlation boost": f"×{edge:.2f}"})
+                sgp_rows.sort(key=lambda r: -float(r["Correlation boost"][1:]))
+                if sgp_rows:
+                    st.dataframe(pd.DataFrame(sgp_rows[:6]), hide_index=True, use_container_width=True)
+                st.caption("⚠️ Simulation, not gospel — it can't know tonight's BABIP luck. "
+                           "Use it for relative reads and correlation, not certainty.")
 
 else:
     st.info("🌴 **The Reds are off today** — the Reds-specific boards are hidden, "
