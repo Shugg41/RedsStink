@@ -29,6 +29,13 @@ AUTORUN_HOUR_ET = 9   # don't run before 9am ET (probables usually posted by the
 CLOSE_MARKER_GAME_PK = 1
 CLOSE_HOUR_ET = 17    # capture near-close odds on the first visit after 5pm ET
 
+# Pregame safety-net sweep: a third marker (game_pk=2). Within a few hours of
+# first pitch it backfills any missing DraftKings lines onto the morning's
+# saved picks (they're usually not posted at 10am), and runs the whole morning
+# routine if it somehow never happened.
+SWEEP_MARKER_GAME_PK = 2
+SWEEP_WINDOW_HOURS = 3
+
 
 # ============================================================
 # COMPOSE (pure — tested)
@@ -273,3 +280,87 @@ def closing_snapshot(supabase_url, db_headers, db_headers_upsert, odds_api_key):
         return patched > 0
     except Exception:
         return False
+
+
+# ============================================================
+# PREGAME SAFETY-NET SWEEP
+# ============================================================
+def should_pregame_sweep(now_et, sweep_marker_exists, ctx,
+                         window_hours=SWEEP_WINDOW_HOURS):
+    """Pure gate: within window_hours of first pitch, still pregame, once/day.
+    Unparseable start times fail closed."""
+    if sweep_marker_exists:
+        return False
+    if not ctx or not ctx.get('is_pregame'):
+        return False
+    try:
+        start_et = dateutil.parser.isoparse(ctx.get('start_utc', '')) \
+                                  .astimezone(data.EASTERN)
+    except Exception:
+        return False
+    delta_h = (start_et - now_et).total_seconds() / 3600.0
+    return 0.0 <= delta_h <= window_hours
+
+
+def pregame_sweep(supabase_url, db_headers, db_headers_upsert,
+                  odds_api_key, ntfy_topic):
+    """The safety net: shortly before first pitch, make sure today's data
+    exists. If the morning routine never ran, run it now; otherwise backfill
+    any picks that were saved before DraftKings posted their lines.
+    Returns the number of rows patched (0/None on no-op)."""
+    try:
+        now = data.now_eastern()
+        date_str = now.strftime("%Y-%m-%d")
+        ctx = pipeline.game_context(data, date_str)
+        swept = _marker_exists(supabase_url, db_headers, date_str,
+                               game_pk=SWEEP_MARKER_GAME_PK)
+        if not should_pregame_sweep(now, swept, ctx):
+            return None
+
+        # Engines never ran today? The existing autorun handles everything
+        # (picks + Ks + briefing, with its own once-a-day marker). Don't claim
+        # the sweep marker in this path, so a later visit can still top up
+        # odds if the lines appear even closer to first pitch.
+        morning = _marker_exists(supabase_url, db_headers, date_str, game_pk=0)
+        if not morning:
+            daily_autorun(supabase_url, db_headers, db_headers_upsert,
+                          odds_api_key, ntfy_topic)
+            return None
+
+        if not _claim_marker(supabase_url, db_headers, date_str,
+                             game_pk=SWEEP_MARKER_GAME_PK, name="_sweep"):
+            return None   # another session claimed it this instant
+
+        # Which of today's picks are missing a price?
+        res = data.http_get(
+            f"{supabase_url}/rest/v1/predictions?date=eq.{date_str}"
+            f"&player_id=gt.0&odds_price=is.null&select=player_id,player_name",
+            headers=db_headers)
+        rows = res.json() if res.status_code == 200 else []
+        if not rows:
+            return 0
+
+        odds, _msgs = data.fetch_reds_batter_odds(odds_api_key)
+        if not odds:
+            return 0
+
+        from engine import normalize_name
+        patched = 0
+        for r in rows:
+            rec = odds.get(normalize_name(r.get('player_name', '')))
+            if not rec or rec.get('price') is None:
+                continue
+            pr = data.http_patch(
+                f"{supabase_url}/rest/v1/predictions"
+                f"?date=eq.{date_str}&player_id=eq.{r['player_id']}",
+                json={"odds_line": rec.get('line'), "odds_price": rec.get('price')},
+                headers=db_headers)
+            if pr.status_code in (200, 204):
+                patched += 1
+
+        if patched:
+            data.ntfy_send(ntfy_topic, "🔴 Reds",
+                           f"🔒 Lines locked: {patched} hitters priced — board's ready")
+        return patched
+    except Exception:
+        return None   # never let the robot take anything down

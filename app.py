@@ -1083,6 +1083,16 @@ if SUPABASE_URL and briefing is not None and not st.session_state.get('autorun_k
         kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
                     db_headers_upsert=DB_HEADERS_UPSERT, odds_api_key=ODDS_API_KEY),
         daemon=True).start()
+    # Pregame safety-net sweep: within ~3h of first pitch, run the engines if
+    # they somehow never ran, and backfill any DraftKings lines that weren't
+    # posted yet when the morning picks were saved (once/day via marker).
+    if hasattr(briefing, 'pregame_sweep'):
+        threading.Thread(
+            target=briefing.pregame_sweep,
+            kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
+                        db_headers_upsert=DB_HEADERS_UPSERT,
+                        odds_api_key=ODDS_API_KEY, ntfy_topic=NTFY_TOPIC),
+            daemon=True).start()
 
 # ============================================================
 # SIDEBAR
