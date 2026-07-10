@@ -8,10 +8,14 @@ Cincinnati Reds prop-betting dashboard — engines, robots, and a simulator.
    offense board, **saves the picks with odds locked in**, projects both
    starters' strikeouts, and **pushes a morning briefing to your phone**
    (via the free [ntfy](https://ntfy.sh) app — subscribe to the topic below).
-2. **~5pm+ ET**: an evening pass captures near-close odds for CLV (needs the
+2. **~1–3h before first pitch**: a pregame safety-net sweep runs the engines
+   if they somehow never ran, and **backfills any DraftKings lines** that
+   weren't posted yet at 10am onto the saved picks (pushes a "🔒 Lines locked"
+   note when it does).
+3. **~5pm+ ET**: an evening pass captures near-close odds for CLV (needs the
    one-line SQL below).
-3. **During the game**: the 📺 Live tab sweats your bets in real time.
-4. **After the game**: results auto-grade; the Tracker shows last game +
+4. **During the game**: the 📺 Live tab sweats your bets in real time.
+5. **After the game**: results auto-grade; the Tracker shows last game +
    season scoreboard for both models.
 
 ## Tabs
