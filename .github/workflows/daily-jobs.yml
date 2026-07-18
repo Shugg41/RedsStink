@@ -1,0 +1,46 @@
+# Runs the daily briefing / pregame sweep / closing snapshot from a REAL cron,
+# in Python, to completion — instead of a Streamlit background thread that
+# Community Cloud kills mid-run (which silently ate every day's notification).
+#
+# Each job inside jobs.py is ET-time-gated and marker-guarded, so firing this
+# on every tick is idempotent — it no-ops until the right window opens and
+# hasn't already run today.
+#
+# REQUIRED repo secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL, SUPABASE_KEY, ODDS_API_KEY, NTFY_TOPIC
+# (same values already in the Streamlit app's secrets)
+name: Daily jobs
+
+on:
+  schedule:
+    # UTC. EDT = UTC-4. Spread across the ET windows so GitHub's cron delays
+    # (10-40 min) don't matter: 10am/12pm/2pm/4pm/6pm/8pm ET.
+    - cron: "0 14 * * *"
+    - cron: "0 16 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 20 * * *"
+    - cron: "0 22 * * *"
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: daily-jobs
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install headless deps
+        run: pip install --quiet requests python-dateutil
+      - name: Run daily jobs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python jobs.py
