@@ -4,6 +4,11 @@ Cincinnati Reds prop-betting dashboard — engines, robots, and a simulator.
 
 ## What it does (daily flow)
 
+These jobs run from a **GitHub Actions cron** (`.github/workflows/daily-jobs.yml`
+→ `jobs.py`), which reliably runs the headless engines to completion —
+independent of whether the Streamlit app happens to be awake/visited. Requires
+the four repo secrets listed under Setup.
+
 1. **~10am ET, automatically**: a robot fetches DraftKings lines, runs the
    offense board, **saves the picks with odds locked in**, projects both
    starters' strikeouts, and **pushes a morning briefing to your phone**
@@ -33,9 +38,14 @@ Cincinnati Reds prop-betting dashboard — engines, robots, and a simulator.
 
 ## One-time setup
 
+- **The daily robot (REQUIRED for briefings)**: add four **GitHub repo secrets**
+  (repo → Settings → Secrets and variables → Actions → New repository secret) —
+  the same values already in the Streamlit app: `SUPABASE_URL`, `SUPABASE_KEY`,
+  `ODDS_API_KEY`, `NTFY_TOPIC`. The `Daily jobs` workflow needs these to reach
+  the database and send pushes. (Encrypted; never printed in logs.)
 - **Morning briefings**: install the free **ntfy** app on your phone and
-  subscribe to the topic `redsstink-briefing-rk84vq` (or set an `NTFY_TOPIC`
-  secret and subscribe to that).
+  subscribe to the topic `redsstink-briefing-rk84vq` (or set `NTFY_TOPIC` to
+  your own topic in both the GitHub secret and the app, and subscribe to that).
 - **CLV (optional)**: run once in the Supabase SQL editor:
   ```sql
   alter table predictions add column closing_line real;
