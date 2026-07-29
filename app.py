@@ -654,14 +654,9 @@ def render_player_card(row, split_label, idx):
                     "hot-lucky": ' <span style="color:#e6a817;">▼ hot-lucky</span>'}.get(tag, "")
         xba_bit = f' &nbsp;|&nbsp; <span>xBA</span>: {row["xBA"]:.3f}{tag_html}'
 
-    # Dual-engine display: multiplicative score chip + disagreement flag
-    mult_score = row.get('Mult_Score')
-    mult_tier  = row.get('Mult_Tier', '')
-    mult_chip  = ""
-    if mult_score is not None:
-        m_emoji = "🟢" if "Tier 1" in mult_tier else ("🟡" if "Tier 2" in mult_tier else "🔴")
-        mult_chip = f'<span class="mult-chip">MULT: {mult_score} {m_emoji}</span>'
-    disagree_flag = '<span class="disagree-flag">⚠ engines differ</span>' if row.get('Disagree') else ""
+    # The additive model leads the board (it's the sharper one on graded results).
+    # The multiplicative score is kept out of the headline to reduce noise — it
+    # still lives in the collapsible receipt below and in the Tracker scoreboard.
 
     # 🎯 HRR (hits+runs+RBI) readout: projection, model P(2+), and the DK 2+ line
     hrr_html = ""
@@ -689,7 +684,7 @@ def render_player_card(row, split_label, idx):
             <div style="display:flex; align-items:center; gap:12px;">
                 <span class="player-score">{row['Score']}</span>
                 <div>
-                    <p class="player-name">#{idx} {html.escape(str(row['Player']))} {mult_chip}{disagree_flag}</p>
+                    <p class="player-name">#{idx} {html.escape(str(row['Player']))}</p>
                     <span class="tier-badge {badge_cls}">{badge_text}</span>
                 </div>
             </div>
@@ -1372,9 +1367,11 @@ if sched_data and sched_data.get('totalGames', 0) > 0:
                     df = pd.DataFrame(scan_results).sort_values(by=['Score', 'Raw_OPS'], ascending=False)
                     for idx_c, (_, row) in enumerate(df.iterrows(), start=1):
                         render_player_card(row, split_label, idx_c)
-                        # Show receipt if either engine flags Tier 1 (disagreements now
-                        # only flag when T1 is involved, so this covers them too)
-                        if ("Tier 1" in row['Tier']) or ("Tier 1" in str(row.get('Mult_Tier',''))):
+                        # Surface the receipt on the additive model's Tier 1 plays —
+                        # those are the ones that have actually made money (63% win,
+                        # +19% ROI on graded results). The multiplicative model alone
+                        # flagging Tier 1 hasn't added edge, so it no longer opens one.
+                        if "Tier 1" in row['Tier']:
                             render_receipt(row)
 
     # ----------------------------------------------------------
