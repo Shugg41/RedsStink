@@ -1,0 +1,23 @@
+# Read-only data snapshot: pulls the saved predictions from Supabase and prints
+# a season report (scoreboard, win rate, ROI, calibration, K accuracy, recent
+# picks) to this Action's log. Writes nothing back. Manual trigger only.
+name: Inspect data
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests python-dateutil
+      - name: Inspect saved data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python inspect_data.py
