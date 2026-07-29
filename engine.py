@@ -299,6 +299,37 @@ def units_won(price, won):
     else:
         return -1.0  # lose the staked unit
 
+def k_prop_side(projected_ks, line):
+    """The strikeout-prop side the engine leans, given its projection vs the
+    posted line. Returns 'over', 'under', or None (no lean when equal/missing).
+    This is fixed at projection time — the engine bets the side it favors."""
+    if projected_ks is None or line is None:
+        return None
+    try:
+        p, l = float(projected_ks), float(line)
+    except (TypeError, ValueError):
+        return None
+    if p > l:
+        return "over"
+    if p < l:
+        return "under"
+    return None
+
+def grade_k_prop(side, line, actual_ks):
+    """Grade the engine's over/under strikeout bet. Returns 1 (win), 0 (loss),
+    or -1 (no bet / exact push on an integer line). Mirrors the hitting grade's
+    {1,0,-1} convention so the same ROI math applies."""
+    if side is None or line is None or actual_ks is None:
+        return -1
+    try:
+        l, a = float(line), float(actual_ks)
+    except (TypeError, ValueError):
+        return -1
+    if a == l:                     # landed exactly on an integer line -> push
+        return -1
+    hit = (a > l) if side == "over" else (a < l)
+    return 1 if hit else 0
+
 def value_metrics(model_prob, american_price):
     """Compare a model win probability (0-1) to a posted price. Returns
     {implied_prob, edge, ev, is_value} or None if there's no usable price.

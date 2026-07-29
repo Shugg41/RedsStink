@@ -3,6 +3,13 @@ import pytest
 
 import jobs
 import briefing
+import grading
+
+
+@pytest.fixture(autouse=True)
+def _no_grade(monkeypatch):
+    """Keep grade_all off the network in every jobs test unless overridden."""
+    monkeypatch.setattr(grading, "grade_all", lambda url, hdrs: 0)
 
 
 def test_db_headers_shape():
@@ -37,7 +44,8 @@ def test_run_dispatches_all_three_with_correct_args(monkeypatch):
 
     assert out == {"daily_autorun": "daily_autorun-ran",
                    "pregame_sweep": "pregame_sweep-ran",
-                   "closing_snapshot": "closing_snapshot-ran"}
+                   "closing_snapshot": "closing_snapshot-ran",
+                   "graded_dates": 0}
     # daily_autorun + pregame_sweep get the ntfy topic; closing_snapshot doesn't
     for name in ("daily_autorun", "pregame_sweep"):
         c = calls[name]
@@ -90,6 +98,18 @@ def test_no_force_leaves_markers_alone(monkeypatch):
     monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
     jobs.run(env={"SUPABASE_URL": "u", "SUPABASE_KEY": "k"})
     assert called["clear"] is False
+
+
+def test_run_grades_with_base_headers(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(grading, "grade_all",
+                        lambda url, hdrs: seen.update(url=url, apikey=hdrs["apikey"]) or 3)
+    monkeypatch.setattr(briefing, "daily_autorun", lambda **kw: None)
+    monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
+    monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
+    out = jobs.run(env={"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_KEY": "k"})
+    assert out["graded_dates"] == 3
+    assert seen == {"url": "https://x.supabase.co", "apikey": "k"}
 
 
 def test_run_defaults_ntfy_topic(monkeypatch):

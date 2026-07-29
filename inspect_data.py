@@ -76,6 +76,16 @@ def run(env=None):
             print(f"  Avg miss           : {ks['avg_miss']} Ks  (|actual - projected|, lower=better)")
             drift = "pitchers K MORE than projected" if ks["bias"] > 0 else "engine runs high"
             print(f"  Bias               : {ks['bias']:+.2f}  ({drift})")
+        kp = backtest.k_prop_record(pit)
+        if kp["n"]:
+            line = (f"  O/U prop record    : {kp['wins']}-{kp['losses']}  "
+                    f"({kp['win_rate'] * 100:.1f}% win, n={kp['n']})")
+            if kp["n_priced"]:
+                line += f"  |  {kp['units']:+.2f}u, {kp['roi_pct']:+.1f}% ROI (n_priced={kp['n_priced']})"
+            print(line)
+        else:
+            print("  O/U prop record    : none graded yet "
+                  "(needs the k_* columns + a posted line — see README SQL)")
         print()
     except Exception as e:
         print(f"  (pitcher data unavailable: {e})\n")

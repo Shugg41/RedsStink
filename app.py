@@ -20,12 +20,15 @@ from engine import *  # noqa: F401,F403
 # the whole dashboard down.
 try:
     from backtest import (last_game_recap, season_scoreboard, scoreboard_verdict,
-                          k_engine_summary, BREAKEVEN_WIN_RATE, MIN_PRICED_FOR_ROI)
+                          k_engine_summary, k_prop_record, BREAKEVEN_WIN_RATE,
+                          MIN_PRICED_FOR_ROI)
 except Exception:  # stale/old backtest.py during a deploy
     def last_game_recap(*a, **k): return None
     def season_scoreboard(*a, **k): return None
     def scoreboard_verdict(*a, **k): return None
     def k_engine_summary(*a, **k): return {"n": 0, "avg_miss": 0.0, "bias": 0.0}
+    def k_prop_record(*a, **k): return {"n": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                                        "units": 0.0, "roi_pct": 0.0, "n_priced": 0}
     BREAKEVEN_WIN_RATE = 0.524
     MIN_PRICED_FOR_ROI = 20
 
@@ -38,6 +41,7 @@ except Exception:
 # fetchers with st.cache_data below; the daily auto-run robot uses them raw.
 import data
 import pipeline
+import grading
 try:
     import briefing
 except Exception:  # stale module during a deploy — the robot just skips a day
@@ -360,139 +364,12 @@ def signed(v):
 # AUTO-GRADER
 # ============================================================
 def auto_grade_worker():
-    """Grade past predictions. Pure network + DB — no Streamlit calls — so it
-    can run in a background thread without blocking the first render."""
+    """Grade past predictions (hitters + pitcher Ks + K-prop O/U). Delegates to
+    the headless grading module — the same code the GitHub cron runs — so the
+    app and the robot grade identically. Pure network + DB, no Streamlit calls."""
     if not SUPABASE_URL:
         return
-    today_str = now_eastern().strftime("%Y-%m-%d")
-
-    dates_to_grade = set()
-    for endpoint in ["predictions", "pitcher_predictions"]:
-        try:
-            res = http_get(f"{SUPABASE_URL}/rest/v1/{endpoint}?graded=eq.0&select=date", headers=DB_HEADERS)
-            if res.status_code == 200 and isinstance(res.json(), list):
-                dates_to_grade.update([r['date'] for r in res.json()])
-        except Exception:
-            pass
-
-    for d in dates_to_grade:
-        try:
-            sched_res = http_get(f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=113&date={d}")
-            if sched_res.status_code != 200:
-                continue
-            sched = sched_res.json()
-            if sched.get('totalGames', 0) == 0:
-                _mark_no_game(d)
-                continue
-
-            games = sched['dates'][0]['games']
-            # A game is gradable when MLB flags it Final — use abstractGameState
-            # (robust) and fall back to known final status codes. Relying only on
-            # a hardcoded code list mislabeled real finals as "no game".
-            def _is_final(g):
-                s = g.get('status', {})
-                return (s.get('abstractGameState') == 'Final'
-                        or s.get('codedGameState') in ('F', 'O')
-                        or s.get('statusCode') in ('F', 'O', 'CR', 'FR'))
-            final_games = [g for g in games if _is_final(g)]
-            all_postponed = all(g['status'].get('statusCode') in ('C', 'P', 'D', 'DI') for g in games)
-
-            if final_games:
-                _grade_final_games(final_games, d, today_str)
-            elif all_postponed or (d < today_str and not any(g['status'].get('statusCode') in ('I', 'S', 'D', 'DI') for g in games)):
-                _mark_no_game(d)
-        except Exception:
-            pass
-
-def _mark_no_game(d):
-    try:
-        http_patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
-                       json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-        http_patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0",
-                       json={"actual_ks": 0, "graded": -1}, headers=DB_HEADERS)
-    except Exception:
-        pass
-
-def _grade_final_games(final_games, d, today_str):
-    # Build a per-game lookup: game_pk -> (players_dict, reds_batters)
-    # Also build a pooled fallback for legacy rows that have no game_pk.
-    per_game = {}
-    pooled_players, pooled_batters = {}, []
-    for game in final_games:
-        gpk = game.get('gamePk')
-        try:
-            feed = http_get(f"https://statsapi.mlb.com/api/v1.1/game/{game['gamePk']}/feed/live").json()
-            box = feed.get('liveData', {}).get('boxscore', {}).get('teams', {})
-            players = {**box.get('away', {}).get('players', {}), **box.get('home', {}).get('players', {})}
-            if feed.get('gameData', {}).get('teams', {}).get('away', {}).get('id') == 113:
-                batters = box.get('away', {}).get('batters', [])
-            else:
-                batters = box.get('home', {}).get('batters', [])
-            per_game[gpk] = (players, batters)
-            pooled_players.update(players)
-            pooled_batters.extend(batters)
-        except Exception:
-            pass
-
-    def _grade_hit_row(p_row, players_dict):
-        p_id = p_row['player_id']
-        tier = p_row.get('tier', '')
-        stats = players_dict.get(f"ID{p_id}", {}).get('stats', {}).get('batting', {})
-        if int(stats.get('plateAppearances', 0)) > 0:
-            hits = stats.get('hits', 0)
-            hrr  = hits + stats.get('runs', 0) + stats.get('rbi', 0)
-            win  = (1 if (hits == 0 and hrr <= 1) else 0) if "Tier 3" in tier else (1 if (hits > 0 or hrr > 1) else 0)
-            return {"actual_hits": hits, "actual_hrr": hrr, "win": win, "graded": 1}
-        return None
-
-    # ---- Grade hitting predictions, per game_pk ----
-    try:
-        preds_res = http_get(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
-        if preds_res.status_code == 200 and preds_res.json():
-            rows = preds_res.json()
-            # default everything to no-result first (win=-1); real results overwrite
-            http_patch(f"{SUPABASE_URL}/rest/v1/predictions?date=eq.{d}&graded=eq.0",
-                           json={"graded": 1, "win": -1}, headers=DB_HEADERS)
-            for p_row in rows:
-                gpk = p_row.get('game_pk')
-                # Pick the right box score: this game if tagged, else pooled (legacy)
-                if gpk is not None and gpk in per_game:
-                    players_dict, _ = per_game[gpk]
-                else:
-                    players_dict = pooled_players
-                patch = _grade_hit_row(p_row, players_dict)
-                if patch:
-                    # Scope the update to the exact row (date+player+game_pk if present)
-                    q = f"date=eq.{d}&player_id=eq.{p_row['player_id']}"
-                    if gpk is not None:
-                        q += f"&game_pk=eq.{gpk}"
-                    http_patch(f"{SUPABASE_URL}/rest/v1/predictions?{q}",
-                                   json=patch, headers=DB_HEADERS)
-    except Exception:
-        pass
-
-    # ---- Grade pitcher predictions (strikeouts), per game_pk ----
-    try:
-        p_preds_res = http_get(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?date=eq.{d}&graded=eq.0", headers=DB_HEADERS)
-        if p_preds_res.status_code == 200 and p_preds_res.json():
-            for p_pred in p_preds_res.json():
-                if p_pred.get('projected_ks') is None:
-                    continue  # legacy outs-only row, skip
-                p_id = p_pred['player_id']
-                gpk  = p_pred.get('game_pk')
-                if gpk is not None and gpk in per_game:
-                    players_dict, _ = per_game[gpk]
-                else:
-                    players_dict = pooled_players
-                p_key = f"ID{p_id}"
-                k_actual = int(players_dict.get(p_key, {}).get('stats', {}).get('pitching', {}).get('strikeOuts', 0)) if p_key in players_dict else 0
-                q = f"player_id=eq.{p_id}&date=eq.{d}"
-                if gpk is not None:
-                    q += f"&game_pk=eq.{gpk}"
-                http_patch(f"{SUPABASE_URL}/rest/v1/pitcher_predictions?{q}",
-                               json={"actual_ks": k_actual, "graded": 1}, headers=DB_HEADERS)
-    except Exception:
-        pass
+    grading.grade_all(SUPABASE_URL, DB_HEADERS)
 
 # ============================================================
 # API HELPERS — cached wrappers around the pure fetchers in data.py
@@ -1591,6 +1468,18 @@ if sched_data and sched_data.get('totalGames', 0) > 0:
                         m1.metric("Avg Miss", f"{ks['avg_miss']:.1f} Ks", help=f"{ks['n']} graded starts")
                         m2.metric("Bias", f"{ks['bias']:+.1f} Ks",
                                   help="Positive = pitchers strike out more than projected (engine runs low)")
+                        # Over/under betting record (only if K lines have been stored)
+                        kp = k_prop_record(df_pactive.to_dict('records'))
+                        if kp['n']:
+                            b1, b2 = st.columns(2)
+                            b1.metric("O/U Prop Record", f"{kp['wins']}–{kp['losses']}",
+                                      help=f"{kp['win_rate']*100:.0f}% win over {kp['n']} graded props")
+                            if kp['n_priced']:
+                                b2.metric("Units", f"{kp['units']:+.2f}u",
+                                          delta=f"{kp['roi_pct']:+.1f}% ROI",
+                                          help=f"{kp['n_priced']} priced props (1u flat)")
+                            else:
+                                b2.metric("Units", "—", help="no stored prices yet")
                         st.divider()
                         df_pdisplay = df_pactive[['date', 'player_name', 'projected_ks', 'actual_ks', 'delta']].sort_values(by='date', ascending=False).copy()
                         df_pdisplay['delta'] = df_pdisplay['delta'].apply(lambda x: f"{x:+.1f}")

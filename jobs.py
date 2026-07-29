@@ -19,6 +19,7 @@ import os
 import sys
 
 import briefing
+import grading
 
 DEFAULT_NTFY_TOPIC = "redsstink-briefing-rk84vq"
 
@@ -90,6 +91,12 @@ def run(env=None):
     # Closing-line snapshot for CLV (dormant unless the columns exist).
     results["closing_snapshot"] = briefing.closing_snapshot(**common)
     print(f"jobs: closing_snapshot -> {results['closing_snapshot']!r}")
+
+    # Grade finished games (hitters + pitcher Ks + K-prop O/U). In-app grading
+    # only runs when someone opens the app; running it here makes results land
+    # automatically, every day.
+    results["graded_dates"] = grading.grade_all(supabase_url, db_headers)
+    print(f"jobs: grade_all -> {results['graded_dates']} date(s) checked")
 
     return results
 

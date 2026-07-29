@@ -302,6 +302,40 @@ def fetch_reds_batter_odds(odds_api_key):
         msgs.append(("error", f"Odds API error: {str(e)}"))
         return {}, msgs
 
+def fetch_reds_pitcher_k_odds(odds_api_key):
+    """pitcher_strikeouts lines for just the Reds game (both starters), all US
+    books with DK as reference. Returns (dict keyed by normalized name, messages).
+    Scoped to the one event like fetch_reds_batter_odds — ~1-2 Odds API credits,
+    not the league-wide sweep fetch_pitcher_strikeout_odds does."""
+    msgs = []
+    if not odds_api_key:
+        return {}, msgs
+    try:
+        ev_res = http_get(f"{ODDS_BASE}/events", params={"apiKey": odds_api_key})
+        if ev_res.status_code != 200:
+            msgs.append(("error", f"Odds API (events) failed: {ev_res.text[:200]}"))
+            return {}, msgs
+        events = ev_res.json() or []
+        reds_event_id = None
+        for ev in events:
+            if 'Reds' in ev.get('home_team', '') or 'Reds' in ev.get('away_team', ''):
+                reds_event_id = ev.get('id')
+                break
+        if not reds_event_id:
+            msgs.append(("warning", "No Reds game on the odds slate for K props today."))
+            return {}, msgs
+        o_res = http_get(
+            f"{ODDS_BASE}/events/{reds_event_id}/odds",
+            params={"apiKey": odds_api_key, "regions": "us",
+                    "markets": "pitcher_strikeouts", "oddsFormat": "american"})
+        if o_res.status_code != 200:
+            msgs.append(("error", f"Odds API (Reds K props) failed: {o_res.text[:200]}"))
+            return {}, msgs
+        return _resolve_k_best(parse_k_odds(o_res.json())), msgs
+    except Exception as e:
+        msgs.append(("error", f"Odds API (Reds K props) error: {e}"))
+        return {}, msgs
+
 def parse_k_odds(game_json, out=None):
     """Parse one event's pitcher_strikeouts markets (ALL books) into per-pitcher
     records: DK reference line/prices + best over/under across books at the
