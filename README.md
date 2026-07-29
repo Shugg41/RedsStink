@@ -20,8 +20,9 @@ the four repo secrets listed under Setup.
 3. **~5pm+ ET**: an evening pass captures near-close odds for CLV (needs the
    one-line SQL below).
 4. **During the game**: the 📺 Live tab sweats your bets in real time.
-5. **After the game**: results auto-grade; the Tracker shows last game +
-   season scoreboard for both models.
+5. **After the game**: the robot auto-grades finished games on its next cron
+   tick (hitters, pitcher Ks, and the K-prop over/under) — no app visit needed —
+   and the Tracker shows last game + season scoreboard for both models.
 
 ## Tabs
 
@@ -51,6 +52,17 @@ the four repo secrets listed under Setup.
   alter table predictions add column closing_line real;
   alter table predictions add column closing_price integer;
   ```
+- **Strikeout-prop tracking (optional)**: gives the K engine a real win/loss +
+  ROI record (over/under vs the posted line). Run once in the Supabase SQL editor:
+  ```sql
+  alter table pitcher_predictions add column k_line real;
+  alter table pitcher_predictions add column k_side text;
+  alter table pitcher_predictions add column k_price integer;
+  alter table pitcher_predictions add column k_win integer;
+  ```
+  After that the daily robot stores each starter's line/side/price and grades the
+  over/under automatically — no manual runs. Until the columns exist it stays
+  dormant (the engine still projects Ks; it just won't grade the prop).
 - **Ask-the-app (optional)**: add `ANTHROPIC_API_KEY` to the Streamlit secrets.
 
 ## Secrets (`.streamlit/secrets.toml` / Streamlit Cloud settings)
@@ -69,6 +81,7 @@ the four repo secrets listed under Setup.
 | `sim.py` | 10,000-game Monte Carlo simulator + SGP correlation |
 | `savant.py` | Statcast (Baseball Savant) fetchers: xBA/xwOBA, barrels |
 | `briefing.py` | morning auto-run + push briefing + closing-odds snapshot |
+| `grading.py` | headless auto-grader (hitters + pitcher Ks + K-prop O/U) — runs in-app AND in the cron |
 | `live.py` | in-game sweat-tracker parsing + live P(clear) math |
 | `lock.py` | league-wide K-prop lock selection (Poisson + EV) |
 | `ai.py` | optional Claude Q&A |

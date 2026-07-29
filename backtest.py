@@ -242,6 +242,29 @@ def k_engine_summary(rows):
             "bias": round(sum(deltas) / len(deltas), 2)}
 
 
+def k_prop_record(rows):
+    """Over/under betting record for the strikeout engine's leaned side.
+    Counts pitcher rows with a graded prop (k_win in {0,1}) and uses k_price for
+    units. Returns {n, wins, losses, win_rate, units, roi_pct, n_priced}."""
+    def _kw(r):
+        try:
+            return int(r.get("k_win"))
+        except (TypeError, ValueError):
+            return None
+    bets = [r for r in rows if _kw(r) in (0, 1)]
+    n = len(bets)
+    if not n:
+        return {"n": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                "units": 0.0, "roi_pct": 0.0, "n_priced": 0}
+    wins = sum(1 for r in bets if _kw(r) == 1)
+    priced = [r for r in bets if r.get("k_price") is not None]
+    units = sum(units_won(r["k_price"], _kw(r)) for r in priced)
+    roi_pct = (units / len(priced) * 100) if priced else 0.0
+    return {"n": n, "wins": wins, "losses": n - wins, "win_rate": wins / n,
+            "units": round(units, 2), "roi_pct": round(roi_pct, 1),
+            "n_priced": len(priced)}
+
+
 # ============================================================
 # REPORT
 # ============================================================

@@ -385,7 +385,9 @@ def run_strikeout_engine(fetch, pitcher_id, pitcher_name, opp_team_id,
 
 
 def pitching_payload(k_projections, date_str, game_pk):
-    """Build the Supabase pitcher_predictions upsert payload."""
+    """Build the Supabase pitcher_predictions upsert payload (base columns —
+    always safe to insert). The strikeout-prop line/side/price are added
+    afterward by apply_k_odds, so a missing-column database never breaks this."""
     return [{
         "date": date_str,
         "player_id": kp["player_id"],
@@ -395,3 +397,19 @@ def pitching_payload(k_projections, date_str, game_pk):
         "actual_ks": 0,
         "graded": 0
     } for kp in k_projections]
+
+
+def k_odds_patches(k_projections, k_odds):
+    """Resolve each projection against the posted K line into a PATCH body:
+    yields (player_id, {k_line, k_side, k_price}). The engine's leaned side is
+    fixed here (projection vs line); price is that side's number. Skips pitchers
+    with no posted line. Pure — the caller applies the PATCHes."""
+    from engine import k_prop_side
+    k_odds = k_odds or {}
+    for kp in k_projections:
+        rec = k_odds.get(normalize_name(kp.get("player_name", "")))
+        if not rec or rec.get("line") is None:
+            continue
+        side = k_prop_side(kp.get("projected_ks"), rec["line"])
+        price = rec.get(f"{side}_price") if side else None
+        yield kp["player_id"], {"k_line": rec["line"], "k_side": side, "k_price": price}

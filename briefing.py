@@ -227,6 +227,19 @@ def daily_autorun(supabase_url, db_headers, db_headers_upsert,
                 f"{supabase_url}/rest/v1/pitcher_predictions?on_conflict=date,player_id,game_pk",
                 json=pipeline.pitching_payload(k_projections, date_str, ctx['game_pk']),
                 headers=db_headers_upsert)
+            # Store each starter's strikeout-prop line/side/price for later
+            # over/under grading (same Reds-event odds call; best-effort — stays
+            # dormant until the k_* columns exist).
+            k_odds, _ = data.fetch_reds_pitcher_k_odds(odds_api_key)
+            gpk = int(ctx['game_pk'] or 0)
+            for pid, body in pipeline.k_odds_patches(k_projections, k_odds):
+                try:
+                    data.http_patch(
+                        f"{supabase_url}/rest/v1/pitcher_predictions"
+                        f"?date=eq.{date_str}&player_id=eq.{pid}&game_pk=eq.{gpk}",
+                        json=body, headers=db_headers)
+                except Exception:
+                    pass
 
         # --- Push the briefing ---
         text = compose_briefing(ctx, scan_results, k_projections, bool(live_odds))
