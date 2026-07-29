@@ -36,6 +36,10 @@ def http_patch(url, **kwargs):
     kwargs.setdefault("timeout", HTTP_TIMEOUT)
     return requests.patch(url, **kwargs)
 
+def http_delete(url, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return requests.delete(url, **kwargs)
+
 
 # ============================================================
 # MLB STATSAPI

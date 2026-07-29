@@ -112,6 +112,19 @@ def _claim_marker(supabase_url, db_headers, date_str, game_pk=0, name=MARKER_NAM
     except Exception:
         return False
 
+def clear_markers(supabase_url, db_headers, date_str):
+    """Delete today's job markers (player_id=0 rows) so a forced run can
+    re-run daily_autorun / pregame_sweep / closing_snapshot. Used only by the
+    manual 'force' path — never on the schedule. Returns True on success."""
+    try:
+        res = data.http_delete(
+            f"{supabase_url}/rest/v1/predictions"
+            f"?date=eq.{date_str}&player_id=eq.{MARKER_PLAYER_ID}",
+            headers=db_headers)
+        return res.status_code in (200, 204)
+    except Exception:
+        return False
+
 def should_autorun(now_et, marker_exists, ctx):
     """Pure gate: run only after AUTORUN_HOUR_ET, once per day, on a pregame
     game day with a known opposing starter (else retry on a later visit)."""

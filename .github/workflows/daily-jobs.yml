@@ -21,7 +21,12 @@ on:
     - cron: "0 20 * * *"
     - cron: "0 22 * * *"
     - cron: "0 0 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-run & re-send today even if already run (clears today's markers)"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-jobs
@@ -43,4 +48,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FORCE: ${{ github.event.inputs.force }}
         run: python jobs.py

@@ -52,6 +52,15 @@ def run(env=None):
     common = dict(supabase_url=supabase_url, db_headers=db_headers,
                   db_headers_upsert=db_headers_upsert, odds_api_key=odds_api_key)
 
+    # FORCE=1 (manual workflow_dispatch input): wipe today's job markers so the
+    # jobs below re-run and re-send even if they already fired today. Use only to
+    # prove end-to-end delivery on demand — the schedule never sets this.
+    force = str(env.get("FORCE") or "").strip().lower() in ("1", "true", "yes")
+    if force:
+        date_str = briefing.data.now_eastern().strftime("%Y-%m-%d")
+        cleared = briefing.clear_markers(supabase_url, db_headers, date_str)
+        print(f"jobs: FORCE set — cleared today's markers ({date_str}): {cleared}")
+
     results = {}
     # Morning briefing (board + picks + K projections + push). Gate: >=9am ET,
     # pregame, probables posted, once/day.

@@ -122,3 +122,27 @@ def test_sweep_noop_when_already_swept(monkeypatch):
     calls = _wire(monkeypatch, sweep_exists=True)
     assert briefing.pregame_sweep("u", {}, {}, "key", "topic") is None
     assert calls["autorun"] == 0 and not calls["patches"]
+
+
+# ------------------------------------------------------------
+# clear_markers — the manual force path
+# ------------------------------------------------------------
+class _Resp:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+def test_clear_markers_deletes_player_zero_rows(monkeypatch):
+    seen = {}
+    def fake_delete(url, headers=None):
+        seen["url"] = url
+        return _Resp(204)
+    monkeypatch.setattr(data, "http_delete", fake_delete)
+    assert briefing.clear_markers("https://x.co", {}, "2026-07-29") is True
+    assert "player_id=eq.0" in seen["url"]
+    assert "date=eq.2026-07-29" in seen["url"]
+
+def test_clear_markers_false_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("down")
+    monkeypatch.setattr(data, "http_delete", boom)
+    assert briefing.clear_markers("u", {}, "2026-07-29") is False
