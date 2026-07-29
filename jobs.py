@@ -60,6 +60,22 @@ def run(env=None):
         date_str = briefing.data.now_eastern().strftime("%Y-%m-%d")
         cleared = briefing.clear_markers(supabase_url, db_headers, date_str)
         print(f"jobs: FORCE set — cleared today's markers ({date_str}): {cleared}")
+        # Delivery diagnostics. Reveals a mis-set NTFY_TOPIC secret without ever
+        # printing its value (GitHub masks the value; a True/False is safe), and
+        # reports whether the push POST actually succeeds to the resolved topic.
+        print(f"jobs: resolved ntfy topic == app default: {ntfy_topic == DEFAULT_NTFY_TOPIC}")
+        ping = briefing.data.ntfy_send(
+            ntfy_topic, "🔴 RedsStink delivery check",
+            "Force-run delivery check — if you see this, the cron's topic is right.")
+        print(f"jobs: test push to resolved topic succeeded: {ping}")
+        # Belt-and-suspenders: if the secret differs from the app default, also
+        # ping the documented default so a wrong secret can't hide a working path.
+        if ntfy_topic != DEFAULT_NTFY_TOPIC:
+            ping2 = briefing.data.ntfy_send(
+                DEFAULT_NTFY_TOPIC, "🔴 RedsStink (default topic)",
+                "This went to the app's DEFAULT topic. Your NTFY_TOPIC secret is "
+                "set to something else — change it to redsstink-briefing-rk84vq.")
+            print(f"jobs: test push to DEFAULT topic succeeded: {ping2}")
 
     results = {}
     # Morning briefing (board + picks + K projections + push). Gate: >=9am ET,

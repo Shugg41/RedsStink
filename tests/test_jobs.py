@@ -52,14 +52,33 @@ def test_run_dispatches_all_three_with_correct_args(monkeypatch):
 
 def test_force_clears_markers_before_running(monkeypatch):
     cleared = {}
+    pings = []
     monkeypatch.setattr(briefing, "clear_markers",
                         lambda url, hdrs, date: cleared.setdefault("url", url) or True)
+    monkeypatch.setattr(briefing.data, "ntfy_send",
+                        lambda topic, *a, **k: pings.append(topic) or True)
     monkeypatch.setattr(briefing, "daily_autorun", lambda **kw: None)
     monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
     monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
     jobs.run(env={"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_KEY": "k",
                   "FORCE": "true"})
     assert cleared["url"] == "https://x.supabase.co"
+    # topic defaulted -> exactly one diagnostic ping, to the default topic
+    assert pings == [jobs.DEFAULT_NTFY_TOPIC]
+
+
+def test_force_pings_both_when_topic_differs(monkeypatch):
+    pings = []
+    monkeypatch.setattr(briefing, "clear_markers", lambda *a, **k: True)
+    monkeypatch.setattr(briefing.data, "ntfy_send",
+                        lambda topic, *a, **k: pings.append(topic) or True)
+    monkeypatch.setattr(briefing, "daily_autorun", lambda **kw: None)
+    monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
+    monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
+    jobs.run(env={"SUPABASE_URL": "u", "SUPABASE_KEY": "k",
+                  "NTFY_TOPIC": "custom-topic", "FORCE": "1"})
+    # resolved topic first, then the default fallback
+    assert pings == ["custom-topic", jobs.DEFAULT_NTFY_TOPIC]
 
 
 def test_no_force_leaves_markers_alone(monkeypatch):
