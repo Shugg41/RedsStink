@@ -1064,35 +1064,15 @@ if SUPABASE_URL:
         threading.Thread(target=auto_grade_worker, daemon=True).start()
 
 # ============================================================
-# DAILY AUTO-RUN — morning board + briefing, kicked by any visit (incl. the
-# keep-awake robot) after 9am ET. Dedup via an atomic marker row, so this is
-# safe to fire on every session; it becomes a no-op after the first run.
+# DAILY AUTO-RUN — now owned entirely by the GitHub cron (jobs.py +
+# .github/workflows/daily-jobs.yml), which runs the headless engines to
+# completion. The old Streamlit background-thread kick was REMOVED: on
+# Community Cloud a bot visit only keeps the app alive ~15s, so the thread
+# would claim the once-a-day marker and then die before saving/sending —
+# silently burning the day AND blocking the reliable cron from re-running.
+# Grading (auto_grade_worker above) stays in-app: it's marker-free and
+# idempotent (operates on graded=0 rows), so it can't get stuck.
 # ============================================================
-if SUPABASE_URL and briefing is not None and not st.session_state.get('autorun_kicked'):
-    st.session_state['autorun_kicked'] = True
-    threading.Thread(
-        target=briefing.daily_autorun,
-        kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
-                    db_headers_upsert=DB_HEADERS_UPSERT,
-                    odds_api_key=ODDS_API_KEY, ntfy_topic=NTFY_TOPIC),
-        daemon=True).start()
-    # Evening pass: capture near-close odds for CLV (no-ops until 5pm ET,
-    # and stays dormant unless the closing_line/closing_price columns exist)
-    threading.Thread(
-        target=briefing.closing_snapshot,
-        kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
-                    db_headers_upsert=DB_HEADERS_UPSERT, odds_api_key=ODDS_API_KEY),
-        daemon=True).start()
-    # Pregame safety-net sweep: within ~3h of first pitch, run the engines if
-    # they somehow never ran, and backfill any DraftKings lines that weren't
-    # posted yet when the morning picks were saved (once/day via marker).
-    if hasattr(briefing, 'pregame_sweep'):
-        threading.Thread(
-            target=briefing.pregame_sweep,
-            kwargs=dict(supabase_url=SUPABASE_URL, db_headers=DB_HEADERS,
-                        db_headers_upsert=DB_HEADERS_UPSERT,
-                        odds_api_key=ODDS_API_KEY, ntfy_topic=NTFY_TOPIC),
-            daemon=True).start()
 
 # ============================================================
 # SIDEBAR

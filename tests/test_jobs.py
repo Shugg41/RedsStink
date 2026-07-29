@@ -50,6 +50,29 @@ def test_run_dispatches_all_three_with_correct_args(monkeypatch):
     assert calls["closing_snapshot"]["supabase_url"] == "https://x.supabase.co"
 
 
+def test_force_clears_markers_before_running(monkeypatch):
+    cleared = {}
+    monkeypatch.setattr(briefing, "clear_markers",
+                        lambda url, hdrs, date: cleared.setdefault("url", url) or True)
+    monkeypatch.setattr(briefing, "daily_autorun", lambda **kw: None)
+    monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
+    monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
+    jobs.run(env={"SUPABASE_URL": "https://x.supabase.co", "SUPABASE_KEY": "k",
+                  "FORCE": "true"})
+    assert cleared["url"] == "https://x.supabase.co"
+
+
+def test_no_force_leaves_markers_alone(monkeypatch):
+    called = {"clear": False}
+    monkeypatch.setattr(briefing, "clear_markers",
+                        lambda *a, **k: called.update(clear=True))
+    monkeypatch.setattr(briefing, "daily_autorun", lambda **kw: None)
+    monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
+    monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
+    jobs.run(env={"SUPABASE_URL": "u", "SUPABASE_KEY": "k"})
+    assert called["clear"] is False
+
+
 def test_run_defaults_ntfy_topic(monkeypatch):
     seen = {}
     monkeypatch.setattr(briefing, "daily_autorun",
