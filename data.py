@@ -384,13 +384,21 @@ def fetch_pitcher_strikeout_odds(odds_api_key, cap=None):
 # NOTIFICATIONS (ntfy.sh — free push, no signup)
 # ============================================================
 def ntfy_send(topic, title, message, tags="baseball"):
-    """Publish a push notification to an ntfy.sh topic. Returns True on success."""
+    """Publish a push notification to an ntfy.sh topic. Returns True on success.
+
+    Uses ntfy's JSON publishing API (topic/title/message all in the UTF-8 body)
+    rather than the Title/Tags HTTP headers. HTTP header values are latin-1 only,
+    so an emoji in the title (e.g. "🔴 Reds Daily Briefing") raised
+    UnicodeEncodeError before the request was even sent — silently killing every
+    briefing push. The JSON body has no such limit.
+    """
     if not topic:
         return False
     try:
-        res = http_post(f"https://ntfy.sh/{topic}",
-                        data=message.encode("utf-8"),
-                        headers={"Title": title, "Tags": tags, "Priority": "default"})
+        tag_list = [t for t in (tags.split(",") if isinstance(tags, str) else tags) if t]
+        res = http_post("https://ntfy.sh",
+                        json={"topic": topic, "title": title,
+                              "message": message, "tags": tag_list})
         return res.status_code in (200, 202)
     except Exception:
         return False
