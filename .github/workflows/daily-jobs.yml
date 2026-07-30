@@ -35,6 +35,10 @@ on:
         description: "Re-run & re-send today even if already run (clears today's markers)"
         type: boolean
         default: false
+      clear_only:
+        description: "Reset today's markers WITHOUT sending, so the next scheduled tick delivers on its own"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-jobs
@@ -57,4 +61,5 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FORCE: ${{ github.event.inputs.force }}
+          CLEAR_ONLY: ${{ github.event.inputs.clear_only }}
         run: python jobs.py
