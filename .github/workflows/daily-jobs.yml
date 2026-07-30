@@ -13,10 +13,18 @@ name: Daily jobs
 
 on:
   schedule:
-    # UTC. EDT = UTC-4. Spread across the ET windows so GitHub's cron delays
-    # (10-40 min) don't matter: 10am/12pm/2pm/4pm/6pm/8pm ET.
-    - cron: "0 14 * * *"
-    - cron: "0 16 * * *"
+    # UTC. EDT = UTC-4. GitHub's scheduled runs fire LATE and unpredictably
+    # (observed 40 min - 2 h behind), so the morning is deliberately dense: the
+    # briefing gate opens at 9am ET (13:00 UTC), and four back-to-back morning
+    # ticks give it several shots to land by ~10-10:30am ET even when GitHub is
+    # slow. Every job is marker-guarded, so the extra ticks are free no-ops once
+    # the briefing has gone out.
+    - cron: "0 13 * * *"     # 9:00am ET  — earliest the briefing gate allows
+    - cron: "20 13 * * *"    # 9:20am ET
+    - cron: "40 13 * * *"    # 9:40am ET
+    - cron: "0 14 * * *"     # 10:00am ET
+    - cron: "30 14 * * *"    # 10:30am ET
+    - cron: "0 16 * * *"     # midday / pregame sweep window
     - cron: "0 18 * * *"
     - cron: "0 20 * * *"
     - cron: "0 22 * * *"
