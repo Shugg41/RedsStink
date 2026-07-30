@@ -53,6 +53,17 @@ def run(env=None):
     common = dict(supabase_url=supabase_url, db_headers=db_headers,
                   db_headers_upsert=db_headers_upsert, odds_api_key=odds_api_key)
 
+    # CLEAR_ONLY=1 (manual workflow_dispatch input): delete today's job markers
+    # and STOP — no jobs run, nothing is sent. This resets the day to its
+    # fresh-morning state so the next *scheduled* tick sends the briefing on its
+    # own — used to prove the unforced schedule path works, without a force send.
+    if str(env.get("CLEAR_ONLY") or "").strip().lower() in ("1", "true", "yes"):
+        date_str = briefing.data.now_eastern().strftime("%Y-%m-%d")
+        cleared = briefing.clear_markers(supabase_url, db_headers, date_str)
+        print(f"jobs: CLEAR_ONLY — deleted today's markers ({date_str}): {cleared}. "
+              f"No jobs run; next scheduled tick will send.")
+        return {"clear_only": cleared}
+
     # FORCE=1 (manual workflow_dispatch input): wipe today's job markers so the
     # jobs below re-run and re-send even if they already fired today. Use only to
     # prove end-to-end delivery on demand — the schedule never sets this.

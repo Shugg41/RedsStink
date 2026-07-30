@@ -89,6 +89,20 @@ def test_force_pings_both_when_topic_differs(monkeypatch):
     assert pings == ["custom-topic", jobs.DEFAULT_NTFY_TOPIC]
 
 
+def test_clear_only_resets_without_running_jobs(monkeypatch):
+    calls = {"cleared": False, "autorun": False}
+    monkeypatch.setattr(briefing, "clear_markers",
+                        lambda *a, **k: calls.update(cleared=True) or True)
+    monkeypatch.setattr(briefing, "daily_autorun",
+                        lambda **kw: calls.update(autorun=True))
+    monkeypatch.setattr(briefing, "pregame_sweep", lambda **kw: None)
+    monkeypatch.setattr(briefing, "closing_snapshot", lambda **kw: None)
+    out = jobs.run(env={"SUPABASE_URL": "u", "SUPABASE_KEY": "k", "CLEAR_ONLY": "true"})
+    assert out == {"clear_only": True}
+    assert calls["cleared"] is True     # markers wiped
+    assert calls["autorun"] is False    # but NO job ran / nothing sent
+
+
 def test_no_force_leaves_markers_alone(monkeypatch):
     called = {"clear": False}
     monkeypatch.setattr(briefing, "clear_markers",
