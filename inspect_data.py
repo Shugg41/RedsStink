@@ -31,12 +31,43 @@ def run(env=None):
 
     rows = _pull(url, key, "predictions")
     picks = [r for r in rows if int(r.get("player_id") or 0) > 0]   # drop marker rows
+    markers = [r for r in rows if int(r.get("player_id") or 0) == 0]  # daily-job markers
     graded = backtest.graded_rows(picks)
     dates = sorted({r.get("date") for r in picks if r.get("date")})
     print(f"Saved pick rows : {len(picks)}")
     print(f"Graded plays    : {len(graded)}")
     print(f"Game-days       : {len(dates)}"
           + (f"  ({dates[0]} … {dates[-1]})" if dates else ""))
+    print()
+
+    # --- Pipeline health: did SAVING and GRADING keep up all season? ---
+    from collections import defaultdict
+    def _g(r):
+        try:
+            return int(r.get("graded"))
+        except (TypeError, ValueError):
+            return 0
+    print("=" * 60)
+    print("  PIPELINE HEALTH — saved vs graded, by month")
+    print("=" * 60)
+    by_month = defaultdict(lambda: [0, 0, 0, 0])  # [saved, graded=1, pending=0, nogame=-1]
+    for r in picks:
+        m = (r.get("date") or "?")[:7]
+        by_month[m][0] += 1
+        g = _g(r)
+        by_month[m][1 if g == 1 else (2 if g == 0 else 3)] += 1
+    mk_month = defaultdict(int)
+    for r in markers:
+        mk_month[(r.get("date") or "?")[:7]] += 1
+    print(f"  {'month':>7}  {'saved':>5} {'graded':>6} {'pending':>7} {'no-game':>7}  {'job-runs':>8}")
+    for m in sorted(by_month):
+        s, g1, g0, gm = by_month[m]
+        print(f"  {m:>7}  {s:>5} {g1:>6} {g0:>7} {gm:>7}  {mk_month.get(m, 0):>8}")
+    pending_dates = sorted({r.get("date") for r in picks if _g(r) == 0})
+    if pending_dates:
+        print(f"\n  Ungraded (graded=0) pick-dates: {len(pending_dates)}  "
+              f"({pending_dates[0]} … {pending_dates[-1]})")
+        print(f"  first few: {pending_dates[:8]}")
     print()
 
     sb = backtest.season_scoreboard(picks)
