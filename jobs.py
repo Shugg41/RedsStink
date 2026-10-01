@@ -53,6 +53,30 @@ def run(env=None):
     common = dict(supabase_url=supabase_url, db_headers=db_headers,
                   db_headers_upsert=db_headers_upsert, odds_api_key=odds_api_key)
 
+    # DIAG_SAVE=1 (manual): do exactly what daily_autorun's board-save does — an
+    # upsert into `predictions` — with a throwaway sentinel row, and PRINT the HTTP
+    # status + response body (the thing daily_autorun silently discarded). Then
+    # delete the sentinel. This surfaces the real reason saves were failing.
+    if str(env.get("DIAG_SAVE") or "").strip().lower() in ("1", "true", "yes"):
+        row = [{"date": "1900-01-01", "player_id": -99999, "player_name": "_diag",
+                "game_pk": 0, "score": 0, "tier": "", "opp_pitcher": "",
+                "actual_hits": 0, "actual_hrr": 0, "graded": -1, "win": -1}]
+        try:
+            r = briefing.data.http_post(
+                f"{supabase_url}/rest/v1/predictions?on_conflict=date,player_id,game_pk",
+                json=row, headers=db_headers_upsert)
+            print(f"jobs: DIAG_SAVE upsert status={r.status_code}  body={r.text[:400]!r}")
+        except Exception as e:
+            print(f"jobs: DIAG_SAVE upsert raised: {type(e).__name__}: {e}")
+        try:
+            d = briefing.data.http_delete(
+                f"{supabase_url}/rest/v1/predictions?player_id=eq.-99999",
+                headers=db_headers)
+            print(f"jobs: DIAG_SAVE cleanup delete status={d.status_code}")
+        except Exception as e:
+            print(f"jobs: DIAG_SAVE cleanup raised: {type(e).__name__}: {e}")
+        return {"diag_save": True}
+
     # CLEAR_ONLY=1 (manual workflow_dispatch input): delete today's job markers
     # and STOP — no jobs run, nothing is sent. This resets the day to its
     # fresh-morning state so the next *scheduled* tick sends the briefing on its

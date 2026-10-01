@@ -198,11 +198,26 @@ def daily_autorun(supabase_url, db_headers, db_headers_upsert,
             savant_batters=sv_batters)
 
         if scan_results:
-            data.http_post(
+            save_res = data.http_post(
                 f"{supabase_url}/rest/v1/predictions?on_conflict=date,player_id,game_pk",
                 json=pipeline.hitting_payload(scan_results, date_str, ctx['game_pk'],
                                               ctx['opp_pitcher_name']),
                 headers=db_headers_upsert)
+            # Do NOT swallow a failed save: a non-2xx here (quota, auth, outage)
+            # used to pass unnoticed because the briefing still sent from the
+            # in-memory board — quietly emptying the season book. Log it to the
+            # cron and push a warning so it can't happen silently again.
+            if getattr(save_res, "status_code", 0) not in (200, 201):
+                print(f"briefing: BOARD SAVE FAILED — status="
+                      f"{getattr(save_res, 'status_code', '?')} "
+                      f"body={getattr(save_res, 'text', '')[:300]!r}")
+                try:
+                    data.ntfy_send(ntfy_topic, "⚠️ RedsStink save failed",
+                                   f"Board ran but the DB save returned HTTP "
+                                   f"{getattr(save_res, 'status_code', '?')} — today's "
+                                   f"picks were NOT recorded.")
+                except Exception:
+                    pass
 
         # --- Strikeout projections for both starters ---
         k_projections = []
