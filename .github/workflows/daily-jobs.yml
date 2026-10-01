@@ -39,6 +39,10 @@ on:
         description: "Reset today's markers WITHOUT sending, so the next scheduled tick delivers on its own"
         type: boolean
         default: false
+      diag_save:
+        description: "Diagnostic: test-write a sentinel row to the DB and print the real HTTP status/body, then delete it"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-jobs
@@ -62,4 +66,5 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FORCE: ${{ github.event.inputs.force }}
           CLEAR_ONLY: ${{ github.event.inputs.clear_only }}
+          DIAG_SAVE: ${{ github.event.inputs.diag_save }}
         run: python jobs.py
